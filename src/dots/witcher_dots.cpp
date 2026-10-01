@@ -158,9 +158,14 @@ bool DeviceMatches(ID3D12Device5* device) {
 int32_t WINAPI Builder(void* owner,const void* context) {
     if(!active.load(std::memory_order_acquire))return originalBuilder(owner,context);
     struct Header {uint32_t version{},pad{};ID3D12GraphicsCommandList4* list{};} header;
-    if(!Readable(owner,profile::kOwnerSize)||!Read(context,0,header)||header.version!=0x201||!header.list)
-        return originalBuilder(owner,context);
-    OwnerScope scope{owner,header.list};OwnerScopeBinding binding(scope);
+    OwnerScope scope{owner};bool accepted{};
+    {
+        cpu_profile::Timer gate(cpu_profile::Part::OwnerGate);
+        accepted=scope.memory.Validate(owner,profile::kOwnerSize)
+            &&Read(context,0,header)&&header.version==0x201&&header.list;
+    }
+    if(!accepted)return originalBuilder(owner,context);
+    scope.list=header.list;OwnerScopeBinding binding(scope);
     return originalBuilder(owner,context);
 }
 int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) try {

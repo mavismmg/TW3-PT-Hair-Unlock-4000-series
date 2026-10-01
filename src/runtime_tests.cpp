@@ -101,7 +101,7 @@ void TestScopedReuse() {
     ExtendedInputs inputs{1,7,1,0,168,0,&geometry};std::string error;
     const auto hits=inputReuseHits.load(),misses=inputReuseMisses.load();
     {
-        OwnerScope scope{owner.data()};OwnerScopeBinding binding(scope);
+        OwnerScope scope{owner.data()};assert(scope.memory.Validate(owner.data(),owner.size()));OwnerScopeBinding binding(scope);
         assert(ownerScope==&scope&&!scope.reuse.valid);
         assert(ReadHairInput(owner.data(),inputs,scope.reuse.input,error));scope.reuse.valid=true;
         assert(front.references>1&&positions.references>1);
@@ -109,7 +109,7 @@ void TestScopedReuse() {
         assert(inputReuseHits.load()==hits+1&&positions.devices==1&&indices.devices==1);
         // Reentrant builders cannot see the outer validation proof.
         {
-            OwnerScope nested{owner.data()};OwnerScopeBinding inner(nested);
+            OwnerScope nested{owner.data()};assert(nested.memory.Validate(owner.data(),owner.size()));OwnerScopeBinding inner(nested);
             assert(ownerScope==&nested&&!nested.reuse.valid);
             HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&nested.reuse));
         }
@@ -165,7 +165,7 @@ void TestScopedReuse() {
     assert(ownerScope==nullptr&&inputReuseHits.load()==hits+2&&inputReuseMisses.load()>=misses+7);
     // A new save can reuse the exact owner address, but not the previous proof.
     for(int save=0;save<15;++save) {
-        OwnerScope scope{owner.data()};OwnerScopeBinding binding(scope);HairInput hair;
+        OwnerScope scope{owner.data()};assert(scope.memory.Validate(owner.data(),owner.size()));OwnerScopeBinding binding(scope);HairInput hair;
         const auto before=positions.devices;
         assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse)&&positions.devices==before+1);
     }
@@ -194,6 +194,75 @@ void TestCheckedSnapshots() {
     // A protected destination must fail under SEH, not write through it.
     assert(!CopyChecked(memory,&geometry,sizeof(geometry)));
     assert(VirtualFree(memory,0,MEM_RELEASE));
+}
+void TestScopedMemory() {
+    using namespace witcher_dots;
+    cpu_profile::SetEnabled(true);
+    const auto queries=[] {return cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls;};
+    std::array<std::byte,profile::kOwnerSize> owner{},other{};
+    OwnerSources sources{};OwnerAs as{};
+    const auto before=queries();
+    {
+        OwnerScope scope{owner.data()};assert(scope.memory.Validate(owner.data(),owner.size()));OwnerScopeBinding binding(scope);
+        const auto afterValidation=queries();assert(afterValidation>before);
+        for(int frameRead=0;frameRead<100;++frameRead) {
+            assert(ReadOwnerSources(owner.data(),sources)); // prebuild
+            assert(ReadOwnerSources(owner.data(),sources)); // build: current pointers
+            assert(ReadOwnerAs(owner.data(),as)); // current BLAS/scratch, not cached values
+        }
+        assert(queries()==afterValidation);
+        auto* current=reinterpret_cast<IUnknown*>(0x12340);
+        memcpy(owner.data()+profile::kPositionOffset,&current,sizeof(current));
+        assert(ReadOwnerSources(owner.data(),sources)&&sources.positions==current&&queries()==afterValidation);
+        // An inner scope cannot borrow the outer range, even for the same owner.
+        {
+            OwnerScope inner{owner.data()};OwnerScopeBinding nested(inner);
+            const auto start=queries();assert(ReadOwnerSources(owner.data(),sources)&&queries()>start);
+        }
+        const auto restored=queries();assert(ReadOwnerSources(owner.data(),sources)&&queries()==restored);
+        assert(ReadOwnerSources(other.data(),sources)&&queries()>restored);
+        const auto unknown=queries();uint64_t word{};
+        assert(!scope.memory.Read(owner.data(),owner.size(),word));
+        assert(!scope.memory.Read(other.data(),0,word));
+        assert(!scope.memory.Read(owner.data(),SIZE_MAX,word)&&queries()==unknown);
+        std::thread isolated([&] {assert(!ownerScope);assert(ReadOwnerSources(owner.data(),sources));});isolated.join();
+    }
+    const auto ended=queries();assert(ReadOwnerSources(owner.data(),sources)&&queries()>ended);
+    // A partial proof never authorizes a wider snapshot.
+    {
+        OwnerScope scope{owner.data()};assert(scope.memory.Validate(owner.data(),8));OwnerScopeBinding binding(scope);
+        const auto start=queries();assert(ReadOwnerSources(owner.data(),sources)&&queries()>start);
+    }
+    ScopedReadRange overflow;
+    assert(!overflow.Validate(reinterpret_cast<void*>(UINTPTR_MAX-8),16));
+    assert(!overflow.Validate(nullptr,8)&&!overflow.Validate(owner.data(),0));
+    // Validate all pages once, then catch a later protection/unmap fault under
+    // SEH. Failed revalidation must erase the previous proof completely.
+    SYSTEM_INFO sys{};GetSystemInfo(&sys);const auto page=sys.dwPageSize;
+    auto* pages=static_cast<std::byte*>(VirtualAlloc(nullptr,2*page,MEM_COMMIT|MEM_RESERVE,PAGE_READWRITE));assert(pages);
+    auto* crossing=pages+page-16;DWORD previous{};
+    {
+        OwnerScope scope{crossing};assert(scope.memory.Validate(crossing,profile::kOwnerSize));OwnerScopeBinding binding(scope);
+        assert(ReadOwnerSources(crossing,sources));
+        assert(VirtualProtect(pages+page,page,PAGE_NOACCESS,&previous));
+        assert(!ReadOwnerSources(crossing,sources)&&!ReadOwnerAs(crossing,as));
+        assert(!scope.memory.Validate(crossing,profile::kOwnerSize));
+        assert(!scope.memory.Contains(crossing,0,8));
+        assert(VirtualProtect(pages+page,page,PAGE_READWRITE|PAGE_GUARD,&previous));
+        assert(!scope.memory.Validate(crossing,profile::kOwnerSize));
+        MEMORY_BASIC_INFORMATION region{};assert(VirtualQuery(pages+page,&region,sizeof(region))&&region.Protect&PAGE_GUARD);
+        assert(VirtualProtect(pages+page,page,PAGE_READWRITE,&previous));
+        assert(scope.memory.Validate(crossing,profile::kOwnerSize));
+        assert(VirtualFree(pages+page,page,MEM_DECOMMIT));
+        assert(!ReadOwnerSources(crossing,sources));
+    }
+    assert(VirtualFree(pages,0,MEM_RELEASE));
+    uint64_t word{};assert(!CopyGuarded(nullptr,&word,sizeof(word))&&!CopyGuarded(&word,nullptr,sizeof(word)));
+    assert(!CopyGuarded(&word,reinterpret_cast<void*>(UINTPTR_MAX-4),sizeof(word)));
+    // Deterministic query-count regression: three snapshots formerly queried
+    // the owner three times, on top of the builder gate. Scoped snapshots do 0.
+    std::printf("PASS: scoped memory proof: 300 owner snapshots, zero additional VirtualQuery; nested/unknown/out-of-range reads use checked fallback; protection/unmap faults contained\n");
+    cpu_profile::SetEnabled(false);
 }
 void TestLeasesAndSaveRetention() {
     using namespace witcher_dots;
@@ -320,7 +389,7 @@ void TestResourceMetadata() {
 int main() {
     using namespace witcher_dots;
     TestResourceMetadata();
-    TestScopedReuse();TestCheckedSnapshots();TestLeasesAndSaveRetention();
+    TestScopedReuse();TestCheckedSnapshots();TestScopedMemory();TestLeasesAndSaveRetention();
     cpu_profile::Window window;cpu_profile::Sample sample{};
     window.Update(100,sample,1000000);assert(!window.known);
     sample[0]={100000,50};window.Update(600,sample,1000000);assert(!window.known);

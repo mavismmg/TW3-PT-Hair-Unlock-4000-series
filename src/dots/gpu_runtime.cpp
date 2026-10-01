@@ -5,6 +5,7 @@
 #include "fence_samples.h"
 #include "cpu_profile.h"
 #include "checked_memory.h"
+#include "input_scope.h"
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
 #include "../single_module.h"
@@ -1093,14 +1094,14 @@ bool ReadOwnerSources(void* owner,OwnerSources& out) {
     cpu_profile::Timer profile(cpu_profile::Part::OwnerRead);
     static_assert(profile::kIndexOffset-profile::kPositionOffset==16);
     std::array<IUnknown*,3> fields{};
-    if(!owner||!Read(owner,profile::kPositionOffset,fields))return false;
+    if(!owner||!ReadOwnerField(owner,profile::kPositionOffset,fields))return false;
     out={fields[0],fields[2]};return true;
 }
 bool ReadOwnerAs(void* owner,OwnerAs& out) {
     cpu_profile::Timer profile(cpu_profile::Part::OwnerRead);
     static_assert(profile::kBlasOffset-profile::kScratchOffset==8);
     std::array<IUnknown*,2> fields{};
-    if(!owner||!Read(owner,profile::kScratchOffset,fields))return false;
+    if(!owner||!ReadOwnerField(owner,profile::kScratchOffset,fields))return false;
     out={fields[0],fields[1]};return true;
 }
 bool ReadGeometry(const void* input,LssGeometry& out) {

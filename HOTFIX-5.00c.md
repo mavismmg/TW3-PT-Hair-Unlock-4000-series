@@ -1,19 +1,72 @@
 # Steam 5.00c local compatibility candidate
 
-Branch: `feature/witcher3-save-stable-performance`, from `79eeb54`.
+Branch: `feature/witcher3-scoped-memory-reads`, from `b891d5a`.
 Experimental local candidate. No push or release.
 
 Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
-`D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37`.
+`19F0562B575A39E08A1287354D9F32890BECCB7A3FC73B3BF3D16EF518337605`.
 
-Previous installed baseline (`79eeb54`) and verified backup SHA-256:
-`E81F6B3FF27299281E566BDCD044718A440BB7B633B380101633B4E2B0D04A1D`.
-Backup: `build/hotfix-backups/E81F6B3FF27299281E566BDCD044718A440BB7B633B380101633B4E2B0D04A1D.addon64.bak`.
+Previous installed baseline (`b891d5a`) and verified backup SHA-256:
+`D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37`.
+Backup: `build/hotfix-backups/D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37.addon64.bak`.
+The earlier `79eeb54` backup (`E81F6B3F...`) is also retained.
+
+## Follow-up: builder-scoped memory reads
+
+The tester still reported low GPU utilization after loading another save with
+`b891d5a`. In the two diagnostic captures, VirtualQuery increased from 15.98 to
+35.10 us/call and owner snapshots from 384.66 to 1028.30 us/call, despite fewer
+calls. Resource unwrap/device identity per-call costs stayed nearly constant;
+runtime mutex waits remained near zero. Nested times overlap and do not measure
+CPU execution independently of waiting. This points to an expensive owner-read
+validation path, not proof of a failed hair renderer or an accumulating leak.
+
+Reference: dashdogy / Michael Robles' MIT-licensed
+[v1.4.1 guarded-read optimization](https://github.com/dashdogy/RTX40MFG-Unlock/blob/866f491f9b899fbe46730c3213d2fe85a8ac8e40/source/native/witcher_dots/witcher_dots.cpp).
+Only the invocation-local guarded-read idea is adapted, not that release's
+shaders, lifetime policy, setting behavior or whole DLL.
+
+This candidate deliberately retains the complete owner-range VirtualQuery
+protection/commit/guard/overflow check **once per builder**. Its noncopyable
+`ScopedReadRange` permits bounded SEH-protected owner-field reads only inside
+that same TLS OwnerScope. Prebuild/build source and build BLAS/scratch snapshots
+always copy current pointer values without repeating their owner-range queries.
+Another owner, an unvalidated/inner scope or an out-of-range field falls back to
+full checked reading; failed range validation clears any previous proof.
+No raw-owner or address-space cache persists between frames/saves. Protected
+copies still catch faults if memory becomes inaccessible after validation.
+As before, memory observations cannot prove absence of concurrent protection
+changes; game owner lifetime must follow the original builder's contract.
+
+Resource unwrapping, native/frontend/device identities, bounds, current AS
+generation, command-list protection checks, buffer states, fences and capacity
+limits remain unchanged. This removes three repeated owner-region probes for
+a typical prebuild/build pair, but not the initial builder check or unrelated
+COM/vtable/descriptor queries. `Builder owner/context gate (separate)` measures
+that remaining initial cost; it is outside the existing hair-hook aggregate
+and prebuild/build totals, while VirtualQuery includes queries from both paths.
+
+Five suites passed in both MSVC Debug and Release. Installed-game profile and
+DXIL checks passed in both. New real-helper tests cover 300 scoped snapshots
+without another query, fresh pointer contents, nested/thread-local scopes,
+unknown owners, partial/expired proofs, overflow, guard pages, changed protection,
+decommit and failed revalidation. Shader/translation/converter/geometry/profile
+files are byte-for-byte unchanged from `b891d5a` and `79eeb54`.
+
+Runtime performance and visual A/B of this candidate are **still pending**.
+Do not claim a utilization fix from host tests. Repeat the A -> B -> A protocol
+below with detailed timers off for FPS, and collect separate diagnostic windows
+after a 30-second warm-up. Check owner snapshots, the new builder gate, and
+VirtualQuery total/per-call costs before and after reloading the save.
+`docs/`, MFG Unlock, game settings and public ABI remain untouched. No push/release.
 
 ## Save-stable performance candidate
+
+The following section records `b891d5a`; its host tests passed, but its runtime
+save-utilization issue persisted in the tester's subsequent capture.
 
 The latest capture shows recent conversion, no rejection, and 11 retained
 associations versus 5 admitted instances. These are different populations:
