@@ -30,8 +30,10 @@ struct BuildParams { uint32_t version{},pad{};const ExtendedBuild* desc{};uint32
 static_assert(sizeof(ExtendedInputs)==32&&sizeof(PrebuildParams)==24&&sizeof(ExtendedBuild)==56&&sizeof(BuildParams)==32);
 static_assert(offsetof(LssGeometry,positions)==24&&offsetof(LssGeometry,radii)==48&&offsetof(LssGeometry,indices)==72);
 struct HairInput {
+    struct Metadata {D3D12_RESOURCE_DESC description{};uint64_t address{};};
     void* owner{};
     Microsoft::WRL::ComPtr<ID3D12Resource> positions,indices,blas,scratch;
+    Metadata positionMetadata,indexMetadata,blasMetadata,scratchMetadata;
     LssGeometry geometry{};
     Plan plan{};
     uint32_t segmentsPerStrand{};

@@ -13,9 +13,81 @@ HMODULE LoadSystemModule(const wchar_t*) noexcept {
 }
 void Log(const wchar_t* text) noexcept {if(text)std::wprintf(L"%ls\n",text);}
 }
+namespace {
+struct HostIdentity final : IUnknown {
+    ULONG references=1;
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        if(iid!=__uuidof(IUnknown))return E_NOINTERFACE;
+        *out=this;AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>1);return --references;}
+};
+struct HostResource final : ID3D12Resource {
+    ULONG references=1;HostIdentity* device{};
+    D3D12_RESOURCE_DESC desc{};uint64_t address{};unsigned descriptions{},addresses{};
+    explicit HostResource(HostIdentity* d,uint64_t a) :device(d),address(a) {desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=4096;}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        if(iid!=__uuidof(IUnknown)&&iid!=__uuidof(ID3D12Resource))return E_NOINTERFACE;
+        *out=this;AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>1);return --references;}
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,UINT*,void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,UINT,const void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID,const IUnknown*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override {return S_OK;}
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID iid,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        if(iid!=__uuidof(ID3D12Device))return E_NOINTERFACE;
+        *out=reinterpret_cast<ID3D12Device*>(device);device->AddRef();return S_OK;
+    }
+    HRESULT STDMETHODCALLTYPE Map(UINT,const D3D12_RANGE*,void**) override {assert(false);return E_NOTIMPL;}
+    void STDMETHODCALLTYPE Unmap(UINT,const D3D12_RANGE*) override {assert(false);}
+    D3D12_RESOURCE_DESC STDMETHODCALLTYPE GetDesc() override {++descriptions;return desc;}
+    D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override {++addresses;return address;}
+    HRESULT STDMETHODCALLTYPE WriteToSubresource(UINT,const D3D12_BOX*,const void*,UINT,UINT) override {assert(false);return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE ReadFromSubresource(void*,UINT,UINT,UINT,const D3D12_BOX*) override {assert(false);return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE GetHeapProperties(D3D12_HEAP_PROPERTIES*,D3D12_HEAP_FLAGS*) override {return E_NOTIMPL;}
+};
+void TestResourceMetadata() {
+    using namespace witcher_dots;
+    HostIdentity device,other;HostResource positions(&device,0x100000),indices(&device,0x200000),replacement(&device,0x300000),foreign(&other,0x400000);
+    C().identity=&device;
+    std::array<std::byte,profile::kOwnerSize> owner{};
+    const auto set=[&](size_t offset,HostResource& resource) {IUnknown* p=&resource;memcpy(owner.data()+offset,&p,sizeof(p));};
+    set(profile::kPositionOffset,positions);set(profile::kIndexOffset,indices);
+    LssGeometry geometry{};geometry.type=5;geometry.flags=1;geometry.vertexCount=6;geometry.indexCount=geometry.primitiveCount=4;
+    geometry.positions={positions.address,16};geometry.positionFormat=DXGI_FORMAT_R32G32B32_FLOAT;
+    geometry.radii={positions.address+12,16};geometry.radiusFormat=DXGI_FORMAT_R32_FLOAT;
+    geometry.indices={indices.address,4};geometry.indexFormat=DXGI_FORMAT_R32_UINT;geometry.primitiveFormat=1;
+    ExtendedInputs inputs{1,7,1,0,168,0,&geometry};std::string error;
+    {
+        HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error));
+        assert(positions.descriptions==1&&positions.addresses==1&&indices.descriptions==1&&indices.addresses==1);
+        assert(hair.positionMetadata.address==positions.address&&hair.indexMetadata.description.Width==4096);
+        assert(hair.plan.segments==4&&hair.segmentsPerStrand==2);
+    }
+    // A new invocation revalidates resource/device ownership, no persistent
+    // owner-pointer cache or stale generation/address is admitted.
+    set(profile::kPositionOffset,replacement);
+    {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error));}
+    geometry.positions.address=replacement.address;geometry.radii.address=replacement.address+12;
+    {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error));assert(hair.positions.Get()==&replacement);}
+    set(profile::kPositionOffset,foreign);geometry.positions.address=foreign.address;geometry.radii.address=foreign.address+12;
+    {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error));assert(foreign.descriptions==0&&foreign.addresses==0);}
+    set(profile::kPositionOffset,positions);positions.desc.Dimension=D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error));assert(positions.descriptions==2&&positions.addresses==1);}
+    C().identity.Reset();
+    assert(device.references==1&&other.references==1&&positions.references==1&&indices.references==1&&replacement.references==1&&foreign.references==1);
+}
+}
 
 int main() {
     using namespace witcher_dots;
+    TestResourceMetadata();
     cpu_profile::Window window;cpu_profile::Sample sample{};
     window.Update(100,sample,1000000);assert(!window.known);
     sample[0]={100000,50};window.Update(600,sample,1000000);assert(!window.known);

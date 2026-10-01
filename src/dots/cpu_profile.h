@@ -5,12 +5,13 @@
 #include <cstdint>
 namespace witcher_dots::cpu_profile {
 enum class Part : size_t { Prebuild, Build, Instances, Input, ResourceUnwrap, DeviceIdentity,
-    BuildLockWait, TableValidation, Recording, InstanceLockWait, Count };
+    BuildLockWait, TableValidation, Recording, InstanceLockWait, ResourceMetadata, DeviceRelease, Count };
 inline constexpr size_t kCount=static_cast<size_t>(Part::Count);
 inline constexpr std::array<const char*,kCount> kLabels{
     "Prebuild total", "Build total", "TLAS preparation total", "Input validation (nested)",
     "Resource unwrap (nested)", "Resource device identity (nested)", "Build mutex wait (nested)",
-    "List validation (nested)", "Driver command recording (nested)", "TLAS mutex wait (nested)"};
+    "List validation (nested)", "Driver command recording (nested)", "TLAS mutex wait (nested)",
+    "Resource description/address (nested)", "Resource device Release (nested)"};
 struct Value {uint64_t ticks{},calls{};};
 using Sample=std::array<Value,kCount>;
 struct Counters {std::atomic<uint64_t> ticks{},calls{};};

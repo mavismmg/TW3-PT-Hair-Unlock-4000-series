@@ -6,7 +6,30 @@ Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
-`CB8F6B3CD1E0C55F6BFB18C71C004E9716C97668B042CF4BA5935F0D0F245E74`.
+`E81F6B3FF27299281E566BDCD044718A440BB7B633B380101633B4E2B0D04A1D`.
+
+## Follow-up: invocation-local immutable resource metadata
+
+The stage-timing screenshot reports 228.20 prebuild ms/s, 456.21 build ms/s,
+448.72 nested input-validation ms/s, and almost zero build/TLAS mutex wait.
+Resource unwrap (51.61 ms/s) and identity (43.50 ms/s) do not explain the whole
+input cost. Driver command recording is only 2.14 ms/s in this sample.
+The measurements locate a costly validation path but do not yet identify its
+entire cost or measure GPU execution. In particular, the original identity
+subtimer excluded the final resource-device COM Release, which may itself wait.
+
+This candidate captures each resource's immutable description/virtual address
+once in the current HairInput and reuses them for its bounds/address checks.
+Each retained native resource is still unwrapped and ownership-validated on
+every invocation; nothing is cached by raw owner across frames or generations.
+A successful prebuild/build pair performs six GetDesc calls instead of twelve,
+with the same six virtual-address queries. GPU commands, shaders, geometry,
+budgets, synchronization, generation and ownership validation are unchanged.
+
+Two more nested diagnostic rows isolate description/address queries and the
+final device Release. Host tests execute the real resource/input helpers and
+check query counts, changed resources/addresses, foreign devices, texture
+rejection and balanced references. No live FPS/utilization gain is claimed.
 
 ## Follow-up: diagnostic-only CPU stage timings
 

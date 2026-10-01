@@ -1044,7 +1044,8 @@ void Restore(ID3D12GraphicsCommandList4* list,const Bindings& b,const RootInfo* 
         }
     }
 }
-bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out,std::string* error=nullptr) {
+bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out,HairInput::Metadata& metadata,std::string* error=nullptr) {
+    metadata={};
     IUnknown* p{};const char* reason=nullptr;
     if(!Read(owner,offset,p)||!p)reason="resource pointer missing/unreadable";
     else {
@@ -1055,7 +1056,18 @@ bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out,std::string*
             {cpu_profile::Timer profile(cpu_profile::Part::DeviceIdentity);
                 if(FAILED(out->GetDevice(IID_PPV_ARGS(&device))))reason="resource GetDevice failed";
                 else if(!OwnedDevice(device.Get()))reason="resource native device identity mismatch";}
-            if(!reason&&out->GetDesc().Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
+            if(!reason) {
+                // Descriptor and virtual address are immutable for this retained
+                // resource. Reuse only within this HairInput, never by raw owner
+                // address across frames/generations. No ownership check is skipped.
+                cpu_profile::Timer profile(cpu_profile::Part::ResourceMetadata);
+                metadata.description=out->GetDesc();
+                if(metadata.description.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
+                else metadata.address=out->GetGPUVirtualAddress();
+            }
+            // COM Release may itself wait in an overlay/driver. The earlier
+            // identity timer excluded this destructor; measure it separately.
+            {cpu_profile::Timer profile(cpu_profile::Part::DeviceRelease);device.Reset();}
         }
     }
     if(!reason)return true;
@@ -1143,17 +1155,17 @@ bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::
             g.positions.stride,g.radii.stride,g.indices.stride,g.endcaps,g.primitiveFormat);
         error=text;return false;
     }
-    if(!Resource(owner,profile::kPositionOffset,out.positions,&error)) {error="hair position buffer: "+error;return false;}
-    if(!Resource(owner,profile::kIndexOffset,out.indices,&error)) {error="hair index buffer: "+error;return false;}
+    if(!Resource(owner,profile::kPositionOffset,out.positions,out.positionMetadata,&error)) {error="hair position buffer: "+error;return false;}
+    if(!Resource(owner,profile::kIndexOffset,out.indices,out.indexMetadata,&error)) {error="hair index buffer: "+error;return false;}
     const auto& g=out.geometry;
-    const auto positions=out.positions->GetDesc(),indices=out.indices->GetDesc();
-    if(out.positions->GetGPUVirtualAddress()!=g.positions.address||out.indices->GetGPUVirtualAddress()!=g.indices.address
+    const auto& positions=out.positionMetadata.description;const auto& indices=out.indexMetadata.description;
+    if(out.positionMetadata.address!=g.positions.address||out.indexMetadata.address!=g.indices.address
         ||positions.Width<uint64_t(g.vertexCount)*16||indices.Width<uint64_t(g.indexCount)*4
         ||(positions.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)||(indices.Flags&D3D12_RESOURCE_FLAG_DENY_SHADER_RESOURCE)) {
         char text[256]{};
         _snprintf_s(text,_TRUNCATE,"hair buffer bounds mismatch (positions va %s width %llu for %u, indices va %s width %llu for %u)",
-            out.positions->GetGPUVirtualAddress()==g.positions.address?"match":"differs",positions.Width,g.vertexCount,
-            out.indices->GetGPUVirtualAddress()==g.indices.address?"match":"differs",indices.Width,g.indexCount);
+            out.positionMetadata.address==g.positions.address?"match":"differs",positions.Width,g.vertexCount,
+            out.indexMetadata.address==g.indices.address?"match":"differs",indices.Width,g.indexCount);
         error=text;return false;
     }
     out.plan=MakePlan(g.primitiveCount,g.vertexCount,g.indexCount);
@@ -1188,8 +1200,8 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         {std::lock_guard lock(C().lock);Reject();}
         error="native command list unwrapping unavailable";return false;
     }
-    if(!Resource(hair.owner,profile::kBlasOffset,hair.blas,&error)) {error="hair BLAS buffer: "+error;return false;}
-    if(!Resource(hair.owner,profile::kScratchOffset,hair.scratch,&error)) {error="hair scratch buffer: "+error;return false;}
+    if(!Resource(hair.owner,profile::kBlasOffset,hair.blas,hair.blasMetadata,&error)) {error="hair BLAS buffer: "+error;return false;}
+    if(!Resource(hair.owner,profile::kScratchOffset,hair.scratch,hair.scratchMetadata,&error)) {error="hair scratch buffer: "+error;return false;}
     auto& ctx=C();cpu_profile::Timer wait(cpu_profile::Part::BuildLockWait);
     std::lock_guard lock(ctx.lock);wait.Stop();
     auto* list=List(native.Get());
@@ -1223,8 +1235,8 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     }
     if(const char* reason=SourceUnreadable(*list,hair.positions.Get())) {error=std::string("hair positions ")+reason;Reject();return false;}
     if(const char* reason=SourceUnreadable(*list,hair.indices.Get())) {error=std::string("hair indices ")+reason;Reject();return false;}
-    const auto blasDesc=hair.blas->GetDesc(),scratchDesc=hair.scratch->GetDesc();
-    if(desc.destination!=hair.blas->GetGPUVirtualAddress()||desc.scratch!=hair.scratch->GetGPUVirtualAddress()
+    const auto& blasDesc=hair.blasMetadata.description;const auto& scratchDesc=hair.scratchMetadata.description;
+    if(desc.destination!=hair.blasMetadata.address||desc.scratch!=hair.scratchMetadata.address
         ||desc.destination%256||desc.scratch%256
         ||!(blasDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
         ||!(scratchDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {error="AS allocation/address mismatch";Reject();return false;}
