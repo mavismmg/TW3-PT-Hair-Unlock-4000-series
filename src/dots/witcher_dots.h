@@ -18,9 +18,12 @@ struct Snapshot {
     uint32_t liveOwners{},hairInstances{};
     uint32_t trackedLists{},listLimit{};
     uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
+    uint64_t inputReuseHits{},inputReuseMisses{};
+    uint32_t leasesRecording{},leasesRecorded{},leasesPending{},leasesAvailable{},leasesUnsafe{};
     double recentHookMsPerSecond{};
     bool recentHookTimeKnown{};
     bool cpuProfileKnown{};
+    bool cpuProfileEnabled{};
     std::array<double,cpu_profile::kCount> cpuMsPerSecond{},cpuCallsPerSecond{};
     bool crashReportRequested{},crashReportArmed{},gameHairTraced{},memoryKnown{};
     char reason[256]{};

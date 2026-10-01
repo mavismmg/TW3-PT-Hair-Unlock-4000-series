@@ -131,7 +131,7 @@ bool VerifiedRuntimeImage(HMODULE module,const wchar_t* path,const char* hash,si
     MEMORY_BASIC_INFORMATION memory{};UINT sdkVersion{};
     if(!version||versionAddress<base||diskNt.OptionalHeader.SizeOfImage<sizeof(sdkVersion)
         ||versionAddress-base>diskNt.OptionalHeader.SizeOfImage-sizeof(sdkVersion)
-        ||VirtualQuery(version,&memory,sizeof(memory))!=sizeof(memory)||memory.AllocationBase!=module
+        ||cpu_profile::QueryMemory(version,&memory,sizeof(memory))!=sizeof(memory)||memory.AllocationBase!=module
         ||memory.Type!=MEM_IMAGE||memory.State!=MEM_COMMIT
         ||(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS|PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))
         ||!Read(version,0,sdkVersion)||sdkVersion!=expectedSdk) {DOTS_TRACE("Agility SDK export rejected version %u protection %lu\n",sdkVersion,memory.Protect);return false;}
@@ -258,7 +258,7 @@ bool PrivateListCallable(HMODULE owner) {
 }
 bool ImageMethod(void* value,HMODULE& owner,bool data=false) {
     MEMORY_BASIC_INFORMATION m{};
-    return value&&VirtualQuery(value,&m,sizeof(m))==sizeof(m)&&m.State==MEM_COMMIT&&m.Type==MEM_IMAGE
+    return value&&cpu_profile::QueryMemory(value,&m,sizeof(m))==sizeof(m)&&m.State==MEM_COMMIT&&m.Type==MEM_IMAGE
         &&!(m.Protect&(PAGE_GUARD|PAGE_NOACCESS))
         &&(data?!(m.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))
             :!!(m.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY)))
@@ -285,7 +285,7 @@ struct PrivateListTable { void** table{};void* allocation{};DWORD protection{};s
 bool PrivateTableMatches(const PrivateListTable& permit,void* object) {
     MEMORY_BASIC_INFORMATION memory{};
     return permit.table&&Table(object)==permit.table
-        &&VirtualQuery(permit.table,&memory,sizeof(memory))==sizeof(memory)
+        &&cpu_profile::QueryMemory(permit.table,&memory,sizeof(memory))==sizeof(memory)
         &&memory.State==MEM_COMMIT&&memory.Type==MEM_PRIVATE&&memory.AllocationBase==permit.allocation
         &&memory.Protect==permit.protection&&memory.Protect==PAGE_READWRITE
         &&reinterpret_cast<uintptr_t>(permit.table)>=reinterpret_cast<uintptr_t>(memory.BaseAddress)
@@ -299,7 +299,7 @@ bool PrivateNativeList(ID3D12GraphicsCommandList4* list,PrivateListTable& permit
     // device identity is checked by the caller. This is not proxy discovery.
     permit.table=Table(list);MEMORY_BASIC_INFORMATION memory{};
     if(!permit.table||reinterpret_cast<uintptr_t>(permit.table)%alignof(void*)
-        ||VirtualQuery(permit.table,&memory,sizeof(memory))!=sizeof(memory))return false;
+        ||cpu_profile::QueryMemory(permit.table,&memory,sizeof(memory))!=sizeof(memory))return false;
     permit.allocation=memory.AllocationBase;permit.protection=memory.Protect;
     if(!PrivateTableMatches(permit,list))return false;
     std::lock_guard guard(publicationLock);
@@ -435,6 +435,7 @@ Context& C() { static auto* const value=new Context;return *value; }
 bool DeviceLuid(LUID& luid) {if(!C().device)return false;luid=C().device->GetAdapterLuid();return true;}
 thread_local bool injecting{};
 std::atomic<bool> removalReportArmed{};
+std::atomic<uint64_t> inputReuseHits{},inputReuseMisses{};
 bool OwnedDevice(ID3D12Device* device) {
     return single_overlay::native::SameNativeIdentity(device,C().identity.Get());
 }
@@ -590,6 +591,7 @@ bool GameHolds(const Association& entry) {
     ULONG ours=0;
     for(const auto& other:C().associations)if(other.blas.Get()==entry.blas.Get())++ours;
     for(const auto& lease:C().leases)if(lease.blas.Get()==entry.blas.Get())++ours;
+    cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
     entry.blas->AddRef();
     return entry.blas->Release()>ours;
 }
@@ -614,13 +616,16 @@ void ReclaimFinished(uint64_t now,QueueSamples& samples) {
         s->reclaimed.store(true,std::memory_order_release);lease.list=nullptr;++ctx.stats.reclaims;
     }
 }
-void EvictReleased() {
+void DropLeaseReferences(Lease& lease) {
+    cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
+    lease.positions.Reset();lease.indices.Reset();lease.blas.Reset();lease.scratch.Reset();
+}
+void EvictReleased(QueueSamples& samples) {
     auto& ctx=C();const uint64_t now=GetTickCount64();
-    QueueSamples samples;
     ReclaimFinished(now,samples);
     for(auto& lease:ctx.leases) {
         if((!lease.vertices&&!lease.blas)||!Available(lease,&samples))continue;
-        if(lease.blas) {lease.positions.Reset();lease.indices.Reset();lease.blas.Reset();lease.scratch.Reset();}
+        if(lease.blas)DropLeaseReferences(lease);
         if(lease.vertices&&now-lease.lastUsed>=kIdleReleaseMs) {
             lease.vertices.Reset();ctx.stats.geometryBytes-=lease.capacity;lease.capacity=0;++ctx.stats.poolReleases;
         }
@@ -629,7 +634,7 @@ void EvictReleased() {
     for(auto& entry:ctx.associations) {
         if(!entry.owner)continue;
         if(GameHolds(entry)) {++live;continue;}
-        entry=Association{};++evicted;
+        {cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);entry=Association{};}++evicted;
     }
     if(!evicted)return;
     ctx.stats.evictions+=evicted;
@@ -638,6 +643,15 @@ void EvictReleased() {
         wchar_t line[160]{};
         swprintf_s(line,L"WITCHER_DOTS released hair evicted=%u live=%u",evicted,live);single_module::Log(line);
     }
+}
+Association* FindAssociation(void* owner) {
+    if(!owner)return nullptr;
+    Association* free=nullptr;
+    for(auto& entry:C().associations) {
+        if(entry.owner==owner)return &entry;
+        if(!entry.owner&&!free)free=&entry;
+    }
+    return free;
 }
 bool Buffer(ID3D12Device* device,uint64_t bytes,D3D12_RESOURCE_STATES initial,ComPtr<ID3D12Resource>& resource) {
     if(!bytes||bytes>kGeometryBudget)return false;
@@ -693,26 +707,26 @@ const char* SourceUnreadable(ListState& list,ID3D12Resource* resource) {
 }
 using ResetFn=HRESULT(STDMETHODCALLTYPE*)(ID3D12GraphicsCommandList*,ID3D12CommandAllocator*,ID3D12PipelineState*);
 bool InstrumentList(ID3D12GraphicsCommandList4* list,void** before=nullptr);
+// Caller holds C().lock. Reset discards only this recording generation;
+// submitted resources stay retained until their own queue/fence completes.
+void ReleaseRecordingLeases(ListState& list,QueueSamples& samples) {
+    for(size_t id:list.leases) {
+        auto& lease=C().leases[id];
+        if(lease.list==list.keep.Get()&&lease.generation==list.generation) {
+            lease.list=nullptr;
+            if(Available(lease,&samples))DropLeaseReferences(lease);
+        }
+    }
+    list.leases.clear();list.hasLeases.store(false,std::memory_order_release);list.reclaimed.store(false,std::memory_order_release);
+}
 HRESULT STDMETHODCALLTYPE Reset(ID3D12GraphicsCommandList* self,ID3D12CommandAllocator* allocator,ID3D12PipelineState* pipeline) {
     const auto hr=Original<ResetFn>(self,10)(self,allocator,pipeline);
     if(FAILED(hr)||injecting)return hr;
     auto* s=List(self);if(!s)return hr;
     if(s->hasLeases.load(std::memory_order_acquire)) {
         std::lock_guard lock(C().lock);
-        for(size_t id:s->leases) {
-            auto& lease=C().leases[id];
-            if(lease.list==s->keep.Get()&&lease.generation==s->generation) {
-                // Unsubmitted recordings can be discarded. Submitted buffers
-                // remain protected by their exact queue/fence completion.
-                lease.list=nullptr;
-                // Resource references are retained until this lease's
-                // submission fence completes, even if Reset occurs first.
-                if(Available(lease)) {
-                    lease.positions.Reset();lease.indices.Reset();lease.blas.Reset();lease.scratch.Reset();
-                }
-            }
-        }
-        s->leases.clear();s->hasLeases.store(false,std::memory_order_release);s->reclaimed.store(false,std::memory_order_release);
+        QueueSamples samples;
+        ReleaseRecordingLeases(*s,samples);
     }
     s->barrierCursor=0;++s->generation;s->open.store(true,std::memory_order_release);
     s->bindings->Clear();s->bindings->pipeline=pipeline;s->bindings->pipelineKnown=true;
@@ -1044,39 +1058,65 @@ void Restore(ID3D12GraphicsCommandList4* list,const Bindings& b,const RootInfo* 
         }
     }
 }
-bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out,HairInput::Metadata& metadata,std::string* error=nullptr) {
-    metadata={};
-    IUnknown* p{};const char* reason=nullptr;
-    if(!Read(owner,offset,p)||!p)reason="resource pointer missing/unreadable";
-    else {
-        {cpu_profile::Timer profile(cpu_profile::Part::ResourceUnwrap);
-            if(!Unwrap(p,out))reason="resource public COM unwrap failed";}
-        if(!reason) {
-            ComPtr<ID3D12Device> device;
-            {cpu_profile::Timer profile(cpu_profile::Part::DeviceIdentity);
-                if(FAILED(out->GetDevice(IID_PPV_ARGS(&device))))reason="resource GetDevice failed";
-                else if(!OwnedDevice(device.Get()))reason="resource native device identity mismatch";}
-            if(!reason) {
-                // Descriptor and virtual address are immutable for this retained
-                // resource. Reuse only within this HairInput, never by raw owner
-                // address across frames/generations. No ownership check is skipped.
-                cpu_profile::Timer profile(cpu_profile::Part::ResourceMetadata);
-                metadata.description=out->GetDesc();
-                if(metadata.description.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
-                else metadata.address=out->GetGPUVirtualAddress();
-            }
-            // COM Release may itself wait in an overlay/driver. The earlier
-            // identity timer excluded this destructor; measure it separately.
-            {cpu_profile::Timer profile(cpu_profile::Part::DeviceRelease);device.Reset();}
-        }
+const char* ResolveResourceFront(IUnknown* p,ComPtr<ID3D12Resource>& out,HairInput::Proof* proof=nullptr) {
+    if(!p)return "resource pointer missing/unreadable";
+    {cpu_profile::Timer profile(cpu_profile::Part::ResourceUnwrap);
+        if(!Unwrap(p,out))return "resource public COM unwrap failed";}
+    if(proof) {
+        cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
+        if(FAILED(out.As(&proof->identity)))return "resource canonical identity unavailable";
+        proof->front=p;
     }
-    if(!reason)return true;
-    if(error) {
-        char text[160]{};
-        _snprintf_s(text,_TRUNCATE,"%s (owner+0x%zx)",reason,offset);
-        *error=text;
+    return nullptr;
+}
+const char* ApproveResource(ID3D12Resource* resource,HairInput::Metadata& metadata) {
+    metadata={};const char* reason=nullptr;
+    ComPtr<ID3D12Device> device;
+    {cpu_profile::Timer profile(cpu_profile::Part::DeviceIdentity);
+        if(FAILED(resource->GetDevice(IID_PPV_ARGS(&device))))reason="resource GetDevice failed";
+        else if(!OwnedDevice(device.Get()))reason="resource native device identity mismatch";}
+    if(!reason) {
+        // Descriptor/address are immutable for this retained resource. Reuse
+        // only inside the proven OwnerScope, never across frames/generations.
+        cpu_profile::Timer profile(cpu_profile::Part::ResourceMetadata);
+        metadata.description=resource->GetDesc();
+        if(metadata.description.Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
+        else metadata.address=resource->GetGPUVirtualAddress();
     }
-    return false;
+    // COM Release may itself wait in an overlay/driver. Measure it separately.
+    {cpu_profile::Timer profile(cpu_profile::Part::DeviceRelease);device.Reset();}
+    return reason;
+}
+struct OwnerSources {IUnknown* positions{};IUnknown* indices{};};
+struct OwnerAs {IUnknown* scratch{};IUnknown* blas{};};
+bool ReadOwnerSources(void* owner,OwnerSources& out) {
+    cpu_profile::Timer profile(cpu_profile::Part::OwnerRead);
+    static_assert(profile::kIndexOffset-profile::kPositionOffset==16);
+    std::array<IUnknown*,3> fields{};
+    if(!owner||!Read(owner,profile::kPositionOffset,fields))return false;
+    out={fields[0],fields[2]};return true;
+}
+bool ReadOwnerAs(void* owner,OwnerAs& out) {
+    cpu_profile::Timer profile(cpu_profile::Part::OwnerRead);
+    static_assert(profile::kBlasOffset-profile::kScratchOffset==8);
+    std::array<IUnknown*,2> fields{};
+    if(!owner||!Read(owner,profile::kScratchOffset,fields))return false;
+    out={fields[0],fields[1]};return true;
+}
+bool ReadGeometry(const void* input,LssGeometry& out) {
+    cpu_profile::Timer profile(cpu_profile::Part::DescriptorCopy);return CopyChecked(&out,input,sizeof(out));
+}
+bool UpdateMatches(const Association& association,const HairInput& hair,const ExtendedBuild& desc) noexcept {
+    return association.blas.Get()==hair.blas.Get()&&association.segments==hair.plan.segments
+        &&association.vertices==hair.geometry.vertexCount&&association.flags==(desc.inputs.flags&~0x20u)
+        &&desc.source==desc.destination;
+}
+bool SameSourceGeometry(const LssGeometry& a,const LssGeometry& b) noexcept {
+    return a.type==b.type&&a.flags==b.flags&&a.vertexCount==b.vertexCount&&a.indexCount==b.indexCount
+        &&a.primitiveCount==b.primitiveCount&&a.positions.address==b.positions.address&&a.positions.stride==b.positions.stride
+        &&a.positionFormat==b.positionFormat&&a.radii.address==b.radii.address&&a.radii.stride==b.radii.stride
+        &&a.radiusFormat==b.radiusFormat&&a.indices.address==b.indices.address&&a.indices.stride==b.indices.stride
+        &&a.indexFormat==b.indexFormat&&a.endcaps==b.endcaps&&a.primitiveFormat==b.primitiveFormat;
 }
 }
 bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error) {
@@ -1143,10 +1183,10 @@ bool AbortGpuPreparation() noexcept {
 void StopConversions() noexcept {
     try {std::lock_guard lock(C().lock);Lost();} catch(...) {}
 }
-bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error) {
+bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error,const InputReuse* reuse) {
     cpu_profile::Timer profile(cpu_profile::Part::Input);
     if(!owner||inputs.type!=1||inputs.count!=1||inputs.layout!=0||inputs.stride!=168
-        ||(inputs.flags!=7&&inputs.flags!=0x27)||!CopyChecked(&out.geometry,inputs.geometry,sizeof(out.geometry))) {error="unknown LSS descriptor";return false;}
+        ||(inputs.flags!=7&&inputs.flags!=0x27)||!ReadGeometry(inputs.geometry,out.geometry)) {error="unknown LSS descriptor";return false;}
     out.owner=owner;
     if(const char* field=InputsInvalid(out)) {
         const auto& g=out.geometry;char text[256]{};
@@ -1155,8 +1195,32 @@ bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::
             g.positions.stride,g.radii.stride,g.indices.stride,g.endcaps,g.primitiveFormat);
         error=text;return false;
     }
-    if(!Resource(owner,profile::kPositionOffset,out.positions,out.positionMetadata,&error)) {error="hair position buffer: "+error;return false;}
-    if(!Resource(owner,profile::kIndexOffset,out.indices,out.indexMetadata,&error)) {error="hair index buffer: "+error;return false;}
+    OwnerSources sources{};
+    if(!ReadOwnerSources(owner,sources)) {error="hair source fields unreadable";return false;}
+    // Prebuild retains proof for its scope; build only needs another proof
+    // when one exists to compare. Updates without a prebuild use the original
+    // full path, without extra canonical/front references for a nonexistent hit.
+    const bool needProof=!reuse||reuse->valid;
+    if(const auto reason=ResolveResourceFront(sources.positions,out.positions,needProof?&out.positionProof:nullptr)) {error=std::string("hair position buffer: ")+reason;return false;}
+    if(const auto reason=ResolveResourceFront(sources.indices,out.indices,needProof?&out.indexProof:nullptr)) {error=std::string("hair index buffer: ")+reason;return false;}
+    // Unwrapping and canonical identity are checked again even on a reuse:
+    // a retained frontend cannot hide a wrapper switching its native object.
+    const bool reused=reuse&&reuse->valid&&reuse->input.owner==owner
+        &&reuse->input.sourceDeviceIdentity.Get()==C().identity.Get()
+        &&SameSourceGeometry(reuse->input.geometry,out.geometry)
+        &&reuse->input.positionProof.front.Get()==sources.positions&&reuse->input.indexProof.front.Get()==sources.indices
+        &&reuse->input.positions.Get()==out.positions.Get()&&reuse->input.indices.Get()==out.indices.Get()
+        &&reuse->input.positionProof.identity.Get()==out.positionProof.identity.Get()
+        &&reuse->input.indexProof.identity.Get()==out.indexProof.identity.Get();
+    if(reused) {
+        out.positionMetadata=reuse->input.positionMetadata;out.indexMetadata=reuse->input.indexMetadata;
+        inputReuseHits.fetch_add(1,std::memory_order_relaxed);
+    } else {
+        inputReuseMisses.fetch_add(1,std::memory_order_relaxed);
+        if(const auto reason=ApproveResource(out.positions.Get(),out.positionMetadata)) {error=std::string("hair position buffer: ")+reason;return false;}
+        if(const auto reason=ApproveResource(out.indices.Get(),out.indexMetadata)) {error=std::string("hair index buffer: ")+reason;return false;}
+    }
+    if(needProof) {cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);out.sourceDeviceIdentity=C().identity;}
     const auto& g=out.geometry;
     const auto& positions=out.positionMetadata.description;const auto& indices=out.indexMetadata.description;
     if(out.positionMetadata.address!=g.positions.address||out.indexMetadata.address!=g.indices.address
@@ -1200,8 +1264,12 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         {std::lock_guard lock(C().lock);Reject();}
         error="native command list unwrapping unavailable";return false;
     }
-    if(!Resource(hair.owner,profile::kBlasOffset,hair.blas,hair.blasMetadata,&error)) {error="hair BLAS buffer: "+error;return false;}
-    if(!Resource(hair.owner,profile::kScratchOffset,hair.scratch,hair.scratchMetadata,&error)) {error="hair scratch buffer: "+error;return false;}
+    OwnerAs buffers{};
+    if(!ReadOwnerAs(hair.owner,buffers)) {error="hair AS fields unreadable";return false;}
+    if(const auto reason=ResolveResourceFront(buffers.blas,hair.blas)) {error=std::string("hair BLAS buffer: ")+reason;return false;}
+    if(const auto reason=ApproveResource(hair.blas.Get(),hair.blasMetadata)) {error=std::string("hair BLAS buffer: ")+reason;return false;}
+    if(const auto reason=ResolveResourceFront(buffers.scratch,hair.scratch)) {error=std::string("hair scratch buffer: ")+reason;return false;}
+    if(const auto reason=ApproveResource(hair.scratch.Get(),hair.scratchMetadata)) {error=std::string("hair scratch buffer: ")+reason;return false;}
     auto& ctx=C();cpu_profile::Timer wait(cpu_profile::Part::BuildLockWait);
     std::lock_guard lock(ctx.lock);wait.Stop();
     auto* list=List(native.Get());
@@ -1240,15 +1308,12 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         ||desc.destination%256||desc.scratch%256
         ||!(blasDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
         ||!(scratchDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {error="AS allocation/address mismatch";Reject();return false;}
-    EvictReleased();
-    Association* association=nullptr;
-    for(auto& entry:ctx.associations)if(entry.owner==hair.owner){association=&entry;break;}
+    QueueSamples samples;
+    EvictReleased(samples);
+    Association* association=FindAssociation(hair.owner);
     const bool update=(desc.inputs.flags&0x20)!=0;
-    if(update&&(!association||association->blas.Get()!=hair.blas.Get()||association->segments!=hair.plan.segments
-        ||association->vertices!=hair.geometry.vertexCount||association->flags!=(desc.inputs.flags&~0x20u)
-        ||desc.source!=desc.destination)) {error="unknown BLAS update generation/topology";Reject();return false;}
+    if(update&&(!association||!association->owner||!UpdateMatches(*association,hair,desc))) {error="unknown BLAS update generation/topology";Reject();return false;}
     if(!update&&desc.source) {error="unexpected BLAS source";Reject();return false;}
-    if(!association)for(auto& entry:ctx.associations)if(!entry.owner){association=&entry;break;}
     if(!association) {error="hair owner capacity exhausted";Reject();return false;}
     // The game allocated these AS buffers from our prebuild sizes; this bound
     // only caps how much live hair is converted (stale owners are evicted).
@@ -1271,7 +1336,6 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         error="triangle BLAS/scratch capacity mismatch";Reject();return false;
     }
     size_t chosen=kMaxLeases;bool reused=false;
-    QueueSamples samples;
     // The game builds all of its hair in one burst at load, in one list. Later
     // builds in the same recording reuse this list's buffer: the converter's
     // NON_PIXEL_SHADER_RESOURCE->UNORDERED_ACCESS transition orders its writes
@@ -1326,7 +1390,8 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     // A newly chosen buffer's previous submission is complete: its fence (and
     // queue) belong to that submission, not to this recording's.
     if(!reused) {lease.queue=nullptr;lease.fenceValue=0;}
-    lease.positions=hair.positions;lease.indices=hair.indices;lease.blas=hair.blas;lease.scratch=hair.scratch;
+    {cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
+        lease.positions=hair.positions;lease.indices=hair.indices;lease.blas=hair.blas;lease.scratch=hair.scratch;}
     lease.list=native.Get();lease.generation=list->generation;
     if(!reused)list->leases.push_back(chosen);
     else ++ctx.stats.leaseReuses;
@@ -1397,7 +1462,8 @@ bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool h
     // No hair builds run while the game's hair is disabled; the TLAS copy
     // still runs, so destroyed hair is released here as well.
     const uint64_t now=GetTickCount64();
-    if(now-ctx.lastSweep>=250) {ctx.lastSweep=now;EvictReleased();}
+    QueueSamples samples;
+    if(now-ctx.lastSweep>=250) {ctx.lastSweep=now;EvictReleased(samples);}
     uint32_t admitted=0;
     if(!hairTraced) {
         // HairWorks stays raster: no hair instance enters any ray traced pass.
@@ -1410,7 +1476,7 @@ bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool h
         // A BLAS the game released can share its address with a newer game
         // allocation (placed-resource reuse): that address is no longer ours.
         // Evicting also drops idle leases' references so the BLAS is freed.
-        if(owned&&!GameHolds(*owned)) {EvictReleased();owned=nullptr;}
+        if(owned&&!GameHolds(*owned)) {EvictReleased(samples);owned=nullptr;}
         if(ctx.stats.lost||!owned||instance.InstanceMask!=0x80||instance.InstanceID>=32) {
             instance.InstanceMask=0;Reject();continue;
         }
@@ -1419,8 +1485,37 @@ bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool h
     if(admitted) {ctx.stats.lastHairTick=now;ctx.stats.hairInstances=admitted;}
     ++ctx.stats.instanceCopies;return true;
 }
+namespace {
+enum class LeasePhase {Empty,Recording,Recorded,Pending,Available,Unsafe};
+LeasePhase ClassifyLease(const Lease& lease,QueueSamples& samples) {
+    if(!lease.vertices&&!lease.blas&&!lease.positions&&!lease.indices&&!lease.scratch)return LeasePhase::Empty;
+    if(lease.poisoned)return LeasePhase::Unsafe;
+    const auto* list=lease.list?List(lease.list):nullptr;
+    if(lease.list&&(!list||list->generation!=lease.generation))return LeasePhase::Unsafe;
+    if(list&&list->open.load(std::memory_order_acquire))return LeasePhase::Recording;
+    if(lease.queue) {
+        const auto queue=C().queues.find(lease.queue);
+        if(queue==C().queues.end())return LeasePhase::Unsafe;
+        const uint64_t complete=Completed(queue->second,&samples);
+        if(complete==UINT64_MAX)return LeasePhase::Unsafe;
+        if(complete<lease.fenceValue)return LeasePhase::Pending;
+    }
+    // A completed closed recording is still bound until reset/reclamation.
+    return lease.list?LeasePhase::Recorded:LeasePhase::Available;
+}
+}
 RuntimeStats ReadRuntimeStats() {
     std::lock_guard lock(C().lock);auto stats=C().stats;
+    stats.inputReuseHits=inputReuseHits.load(std::memory_order_relaxed);stats.inputReuseMisses=inputReuseMisses.load(std::memory_order_relaxed);
+    // UI-only gauges, at most twice a second; no permanent driver polling.
+    static uint64_t sampled{};
+    static std::array<uint32_t,6> counts{};
+    const uint64_t now=GetTickCount64();
+    if(!sampled||now-sampled>=500) {
+        sampled=now;counts={};QueueSamples samples;
+        for(const auto& lease:C().leases)++counts[static_cast<size_t>(ClassifyLease(lease,samples))];
+    }
+    stats.leasesRecording=counts[1];stats.leasesRecorded=counts[2];stats.leasesPending=counts[3];stats.leasesAvailable=counts[4];stats.leasesUnsafe=counts[5];
     stats.trackedLists=static_cast<uint32_t>(C().lists.size());stats.listLimit=static_cast<uint32_t>(kMaxLists);
     for(const auto& entry:C().associations)if(entry.owner) {
         ++stats.liveOwners;stats.hairBlasBytes+=entry.bytes;stats.hairScratchBytes+=entry.scratchBytes;

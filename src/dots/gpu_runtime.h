@@ -1,6 +1,7 @@
 #pragma once
 #include "geometry.h"
 #include "shaders.h"
+#include "cpu_profile.h"
 #include <d3d12.h>
 #include <wrl/client.h>
 #include <cstdint>
@@ -31,13 +32,30 @@ static_assert(sizeof(ExtendedInputs)==32&&sizeof(PrebuildParams)==24&&sizeof(Ext
 static_assert(offsetof(LssGeometry,positions)==24&&offsetof(LssGeometry,radii)==48&&offsetof(LssGeometry,indices)==72);
 struct HairInput {
     struct Metadata {D3D12_RESOURCE_DESC description{};uint64_t address{};};
+    struct Proof {Microsoft::WRL::ComPtr<IUnknown> front,identity;};
     void* owner{};
     Microsoft::WRL::ComPtr<ID3D12Resource> positions,indices,blas,scratch;
     Metadata positionMetadata,indexMetadata,blasMetadata,scratchMetadata;
+    Proof positionProof,indexProof;
+    Microsoft::WRL::ComPtr<IUnknown> sourceDeviceIdentity;
     LssGeometry geometry{};
     Plan plan{};
     uint32_t segmentsPerStrand{};
+    HairInput()=default;
+    HairInput(const HairInput&)=default;
+    HairInput& operator=(const HairInput&)=default;
+    HairInput(HairInput&&) noexcept=default;
+    HairInput& operator=(HairInput&&) noexcept=default;
+    ~HairInput() {
+        if(!positions&&!indices&&!blas&&!scratch&&!positionProof.front&&!positionProof.identity&&!indexProof.front&&!indexProof.identity&&!sourceDeviceIdentity)return;
+        cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
+        // Include the scoped cache's final releases, not just COM queries.
+        positionProof.front.Reset();positionProof.identity.Reset();indexProof.front.Reset();indexProof.identity.Reset();
+        positions.Reset();indices.Reset();blas.Reset();scratch.Reset();
+        sourceDeviceIdentity.Reset();
+    }
 };
+struct InputReuse {HairInput input;bool valid{};};
 struct RuntimeStats {
     uint64_t prebuilds{}, builds{}, updates{}, rejected{}, shaderLibraries{}, instanceCopies{}, geometryBytes{}, leaseReuses{};
     uint64_t lastBuildTick{}, lastHairTick{}; // GetTickCount64 of the latest conversion / admitted hair instance
@@ -47,6 +65,8 @@ struct RuntimeStats {
     uint32_t liveOwners{}, hairInstances{}; // live associations; hair instances in the latest admitting copy
     uint32_t trackedLists{},listLimit{};
     uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
+    uint64_t inputReuseHits{},inputReuseMisses{};
+    uint32_t leasesRecording{},leasesRecorded{},leasesPending{},leasesAvailable{},leasesUnsafe{};
     bool lost{};
 };
 bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error);
@@ -54,7 +74,7 @@ bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error
 // Forwarding bindings and retained interfaces remain alive for racing callers.
 bool AbortGpuPreparation() noexcept;
 void StopConversions() noexcept;
-bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error);
+bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error,const InputReuse* reuse=nullptr);
 bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& info);
 bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* list,const ExtendedBuild& desc,std::string& error);
 // Modify a private copy of this game's CPU instance data. Suppress unowned

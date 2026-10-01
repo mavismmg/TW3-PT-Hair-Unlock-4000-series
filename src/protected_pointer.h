@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <intrin.h>
+#include "dots/cpu_profile.h"
 
 namespace protected_pointer
 {
@@ -37,7 +38,7 @@ inline bool ProtectionMatches(uintptr_t address, DWORD expected,
 {
     MEMORY_BASIC_INFORMATION memory{};
     if (!address || size == 0
-        || VirtualQuery(reinterpret_cast<const void*>(address), &memory,
+        || witcher_dots::cpu_profile::QueryMemory(reinterpret_cast<const void*>(address), &memory,
                sizeof(memory))
             != sizeof(memory)
         || memory.State != MEM_COMMIT)
@@ -62,7 +63,7 @@ inline bool QueryProtection(uintptr_t address, DWORD& protection,
 {
     MEMORY_BASIC_INFORMATION memory{};
     if (!address || size == 0
-        || VirtualQuery(reinterpret_cast<const void*>(address), &memory,
+        || witcher_dots::cpu_profile::QueryMemory(reinterpret_cast<const void*>(address), &memory,
                sizeof(memory))
             != sizeof(memory)
         || memory.State != MEM_COMMIT)

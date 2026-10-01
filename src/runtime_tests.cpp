@@ -5,6 +5,7 @@
 #include "dots/geometry.cpp"
 #include "dots/shader_cache.cpp"
 #include "dots/shader_ir.cpp"
+#include "dots/input_scope.h"
 #include <cassert>
 #include <thread>
 namespace single_module {
@@ -22,11 +23,11 @@ struct HostIdentity final : IUnknown {
         *out=this;AddRef();return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
-    ULONG STDMETHODCALLTYPE Release() override {assert(references>1);return --references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>0);return --references;}
 };
 struct HostResource final : ID3D12Resource {
     ULONG references=1;HostIdentity* device{};
-    D3D12_RESOURCE_DESC desc{};uint64_t address{};unsigned descriptions{},addresses{};
+    D3D12_RESOURCE_DESC desc{};uint64_t address{};unsigned descriptions{},addresses{},devices{};
     explicit HostResource(HostIdentity* d,uint64_t a) :device(d),address(a) {desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=4096;}
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
         if(!out)return E_POINTER;*out=nullptr;
@@ -34,12 +35,13 @@ struct HostResource final : ID3D12Resource {
         *out=this;AddRef();return S_OK;
     }
     ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
-    ULONG STDMETHODCALLTYPE Release() override {assert(references>1);return --references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>0);return --references;}
     HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,UINT*,void*) override {return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,UINT,const void*) override {return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID,const IUnknown*) override {return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override {return S_OK;}
     HRESULT STDMETHODCALLTYPE GetDevice(REFIID iid,void** out) override {
+        ++devices;
         if(!out)return E_POINTER;*out=nullptr;
         if(iid!=__uuidof(ID3D12Device))return E_NOINTERFACE;
         *out=reinterpret_cast<ID3D12Device*>(device);device->AddRef();return S_OK;
@@ -52,6 +54,236 @@ struct HostResource final : ID3D12Resource {
     HRESULT STDMETHODCALLTYPE ReadFromSubresource(void*,UINT,UINT,UINT,const D3D12_BOX*) override {assert(false);return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE GetHeapProperties(D3D12_HEAP_PROPERTIES*,D3D12_HEAP_FLAGS*) override {return E_NOTIMPL;}
 };
+struct HostFrontend final : IUnknown {
+    ULONG references=1;HostResource* native{};
+    explicit HostFrontend(HostResource& resource):native(&resource) {}
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        constexpr GUID base={0xadec44e2,0x61f0,0x45c3,{0xad,0x9f,0x1b,0x37,0x37,0x92,0x84,0xff}};
+        if(iid==base) {*out=native;native->AddRef();return S_OK;}
+        if(iid!=__uuidof(IUnknown))return E_NOINTERFACE;
+        *out=this;AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>0);return --references;}
+};
+struct HostFence final : ID3D12Fence {
+    ULONG references=1;uint64_t complete{};unsigned queries{};
+    HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
+        if(!out)return E_POINTER;*out=nullptr;
+        if(iid!=__uuidof(IUnknown)&&iid!=__uuidof(ID3D12Fence))return E_NOINTERFACE;
+        *out=this;AddRef();return S_OK;
+    }
+    ULONG STDMETHODCALLTYPE AddRef() override {return ++references;}
+    ULONG STDMETHODCALLTYPE Release() override {assert(references>0);return --references;}
+    HRESULT STDMETHODCALLTYPE GetPrivateData(REFGUID,UINT*,void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateData(REFGUID,UINT,const void*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetPrivateDataInterface(REFGUID,const IUnknown*) override {return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE SetName(LPCWSTR) override {return S_OK;}
+    HRESULT STDMETHODCALLTYPE GetDevice(REFIID,void**) override {return E_NOTIMPL;}
+    UINT64 STDMETHODCALLTYPE GetCompletedValue() override {++queries;return complete;}
+    HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64,HANDLE) override {assert(false);return E_NOTIMPL;}
+    HRESULT STDMETHODCALLTYPE Signal(UINT64) override {assert(false);return E_NOTIMPL;}
+};
+void TestScopedReuse() {
+    using namespace witcher_dots;
+    HostIdentity device,other;
+    HostResource positions(&device,0x100000),indices(&device,0x200000),replacement(&device,0x300000),foreign(&other,0x400000);
+    HostFrontend front(positions),secondFront(positions);
+    C().identity=&device;
+    std::array<std::byte,profile::kOwnerSize> owner{},otherOwner{};
+    const auto set=[&](auto& memory,size_t offset,IUnknown* resource) {memcpy(memory.data()+offset,&resource,sizeof(resource));};
+    set(owner,profile::kPositionOffset,&front);set(owner,profile::kIndexOffset,&indices);
+    LssGeometry geometry{};geometry.type=5;geometry.flags=1;geometry.vertexCount=6;geometry.indexCount=geometry.primitiveCount=4;
+    geometry.positions={positions.address,16};geometry.positionFormat=DXGI_FORMAT_R32G32B32_FLOAT;
+    geometry.radii={positions.address+12,16};geometry.radiusFormat=DXGI_FORMAT_R32_FLOAT;
+    geometry.indices={indices.address,4};geometry.indexFormat=DXGI_FORMAT_R32_UINT;geometry.primitiveFormat=1;
+    ExtendedInputs inputs{1,7,1,0,168,0,&geometry};std::string error;
+    const auto hits=inputReuseHits.load(),misses=inputReuseMisses.load();
+    {
+        OwnerScope scope{owner.data()};OwnerScopeBinding binding(scope);
+        assert(ownerScope==&scope&&!scope.reuse.valid);
+        assert(ReadHairInput(owner.data(),inputs,scope.reuse.input,error));scope.reuse.valid=true;
+        assert(front.references>1&&positions.references>1);
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        assert(inputReuseHits.load()==hits+1&&positions.devices==1&&indices.devices==1);
+        // Reentrant builders cannot see the outer validation proof.
+        {
+            OwnerScope nested{owner.data()};OwnerScopeBinding inner(nested);
+            assert(ownerScope==&nested&&!nested.reuse.valid);
+            HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&nested.reuse));
+        }
+        assert(ownerScope==&scope&&positions.devices==2);
+        try {OwnerScope nested;OwnerScopeBinding inner(nested);throw 1;}catch(int) {}
+        assert(ownerScope==&scope);
+        std::thread isolated([] {assert(ownerScope==nullptr);});isolated.join();
+        // Padding is not geometry; changing any meaningful field is.
+        ++geometry.pad0;
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        auto changed=geometry;changed.vertexCount+=2;changed.primitiveCount=changed.indexCount=6;
+        inputs.geometry=&changed;
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));assert(hair.plan.segments==6);}
+        assert(positions.devices==3&&indices.devices==3);inputs.geometry=&geometry;
+        const auto different=[&](auto alter) {auto copy=geometry;alter(copy);assert(!SameSourceGeometry(geometry,copy));};
+        different([](auto& g){++g.type;});different([](auto& g){++g.flags;});
+        different([](auto& g){++g.vertexCount;});different([](auto& g){++g.indexCount;});different([](auto& g){++g.primitiveCount;});
+        different([](auto& g){++g.positions.address;});different([](auto& g){++g.positions.stride;});different([](auto& g){++g.positionFormat;});
+        different([](auto& g){++g.radii.address;});different([](auto& g){++g.radii.stride;});different([](auto& g){++g.radiusFormat;});
+        different([](auto& g){++g.indices.address;});different([](auto& g){++g.indices.stride;});different([](auto& g){++g.indexFormat;});
+        different([](auto& g){++g.endcaps;});different([](auto& g){++g.primitiveFormat;});
+        // Different frontend, same native object: full validation is required.
+        set(owner,profile::kPositionOffset,&secondFront);
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        assert(positions.devices==4);set(owner,profile::kPositionOffset,&front);
+        // Same retained frontend, different native object/address: never reuse.
+        front.native=&replacement;
+        {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        assert(replacement.devices==1);
+        geometry.positions.address=replacement.address;geometry.radii.address=replacement.address+12;
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        front.native=&foreign;geometry.positions.address=foreign.address;geometry.radii.address=foreign.address+12;
+        {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        assert(foreign.devices==1&&foreign.descriptions==0);
+        front.native=&positions;geometry.positions.address=positions.address;geometry.radii.address=positions.address+12;
+        otherOwner=owner;
+        {HairInput hair;assert(ReadHairInput(otherOwner.data(),inputs,hair,error,&scope.reuse));}
+        assert(positions.devices==5);
+        set(owner,profile::kIndexOffset,&replacement);geometry.indices.address=replacement.address;
+        {HairInput hair;assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        assert(positions.devices==6&&replacement.devices==3);
+        set(owner,profile::kIndexOffset,&indices);geometry.indices.address=indices.address;
+        // AS pointers are reread separately, even when source reuse is valid.
+        set(owner,profile::kBlasOffset,&replacement);set(owner,profile::kScratchOffset,&indices);
+        OwnerAs as;assert(ReadOwnerAs(owner.data(),as)&&as.blas==&replacement&&as.scratch==&indices);
+        set(owner,profile::kBlasOffset,&foreign);assert(ReadOwnerAs(owner.data(),as)&&as.blas==&foreign);
+        // A prepared-device change invalidates the proof, even if the owner,
+        // frontend, native object and descriptor are all unchanged.
+        C().identity=&other;
+        {HairInput hair;assert(!ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse));}
+        C().identity=&device;
+    }
+    assert(ownerScope==nullptr&&inputReuseHits.load()==hits+2&&inputReuseMisses.load()>=misses+7);
+    // A new save can reuse the exact owner address, but not the previous proof.
+    for(int save=0;save<15;++save) {
+        OwnerScope scope{owner.data()};OwnerScopeBinding binding(scope);HairInput hair;
+        const auto before=positions.devices;
+        assert(ReadHairInput(owner.data(),inputs,hair,error,&scope.reuse)&&positions.devices==before+1);
+    }
+    C().identity.Reset();
+    assert(device.references==1&&other.references==1&&front.references==1&&secondFront.references==1);
+    assert(positions.references==1&&indices.references==1&&replacement.references==1&&foreign.references==1);
+}
+void TestCheckedSnapshots() {
+    using namespace witcher_dots;
+    SYSTEM_INFO system{};GetSystemInfo(&system);const auto page=system.dwPageSize;
+    auto* memory=static_cast<std::byte*>(VirtualAlloc(nullptr,2*page,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));assert(memory);
+    OwnerSources sources;OwnerAs as;LssGeometry geometry{};DWORD previous{};
+    assert(ReadOwnerSources(memory,sources)&&ReadOwnerAs(memory,as)&&ReadGeometry(memory,geometry));
+    assert(VirtualProtect(memory+page,page,PAGE_NOACCESS,&previous));
+    assert(!ReadOwnerSources(memory+page-profile::kPositionOffset-8,sources));
+    assert(!ReadOwnerAs(memory+page-profile::kScratchOffset-8,as));
+    assert(!ReadGeometry(memory+page-8,geometry));
+    assert(VirtualProtect(memory+page,page,PAGE_READWRITE|PAGE_GUARD,&previous));
+    assert(!ReadGeometry(memory+page,geometry));
+    assert(VirtualFree(memory+page,page,MEM_DECOMMIT));assert(!ReadGeometry(memory+page,geometry));
+    assert(!ReadOwnerSources(nullptr,sources)&&!ReadOwnerAs(nullptr,as)&&!ReadGeometry(nullptr,geometry));
+    assert(!ReadOwnerSources(reinterpret_cast<void*>(UINTPTR_MAX-8),sources));
+    assert(!ReadOwnerAs(reinterpret_cast<void*>(UINTPTR_MAX-8),as));
+    assert(VirtualProtect(memory,page,PAGE_READONLY,&previous));
+    assert(ReadGeometry(memory,geometry));
+    // A protected destination must fail under SEH, not write through it.
+    assert(!CopyChecked(memory,&geometry,sizeof(geometry)));
+    assert(VirtualFree(memory,0,MEM_RELEASE));
+}
+void TestLeasesAndSaveRetention() {
+    using namespace witcher_dots;
+    HostIdentity device,queueIdentity;HostFence fence;
+    HostResource vertices(&device,0x100000),source(&device,0x200000),blas(&device,0x300000),newBlas(&device,0x400000);
+    auto* queue=reinterpret_cast<ID3D12CommandQueue*>(&queueIdentity);
+    auto& ctx=C();auto& q=ctx.queues[queue];q.keep=queue;q.fence=&fence;
+    auto& first=ctx.leases[0];auto& second=ctx.leases[1];
+    first.vertices=&vertices;first.positions=&source;first.blas=&blas;first.queue=queue;first.fenceValue=10;first.lastUsed=GetTickCount64();
+    second.positions=&source;second.blas=&blas;second.queue=queue;second.fenceValue=20;second.lastUsed=first.lastUsed;
+    auto& association=ctx.associations[0];association.owner=reinterpret_cast<void*>(0x1234);association.blas=&blas;association.positions=&source;
+    // Save unload releases the game's reference. Pending leases still own data.
+    blas.Release();assert(!GameHolds(association));
+    QueueSamples pending;assert(!Available(first,&pending)&&!Available(second,&pending));
+    assert(ClassifyLease(first,pending)==LeasePhase::Pending&&fence.queries==1);
+    EvictReleased(pending);assert(first.blas&&second.blas&&source.references==3&&!association.owner&&fence.queries==1);
+    // Address reused by a new save: old leases cannot become its generation.
+    association.owner=reinterpret_cast<void*>(0x1234);association.blas=&newBlas;association.positions=&source;
+    HairInput hair;hair.blas=&blas;hair.plan.segments=4;hair.geometry.vertexCount=6;
+    association.segments=4;association.vertices=6;association.flags=7;
+    ExtendedBuild desc{};desc.inputs.flags=0x27;desc.source=desc.destination=0x400000;
+    assert(!UpdateMatches(association,hair,desc));hair.blas=&newBlas;assert(UpdateMatches(association,hair,desc));
+    ++hair.geometry.vertexCount;assert(!UpdateMatches(association,hair,desc));--hair.geometry.vertexCount;
+    ++desc.source;assert(!UpdateMatches(association,hair,desc));--desc.source;
+    // One operation keeps the conservative older fence value after progression.
+    fence.complete=10;QueueSamples completed;EvictReleased(completed);
+    assert(!first.blas&&second.blas&&GameHolds(association));
+    assert(ClassifyLease(first,completed)==LeasePhase::Available);
+    fence.complete=20;assert(!Available(second,&completed));
+    QueueSamples fresh;EvictReleased(fresh);assert(!second.blas&&blas.references==0&&association.owner);
+    assert(source.references==2); // game + new association, not stale leases
+    // Missing queues, device removal, and poisoned leases fail closed.
+    second.positions=&source;second.queue=queue;second.fenceValue=30;
+    fence.complete=UINT64_MAX;QueueSamples removed;
+    assert(!Available(second,&removed)&&ClassifyLease(second,removed)==LeasePhase::Unsafe);
+    second.queue=reinterpret_cast<ID3D12CommandQueue*>(0x4567);QueueSamples missing;
+    assert(!Available(second,&missing)&&ClassifyLease(second,missing)==LeasePhase::Unsafe);
+    second.queue=nullptr;second.poisoned=true;assert(!Available(second)&&ClassifyLease(second,missing)==LeasePhase::Unsafe);
+    // Recorded leases are not reusable before reset/reclamation; mismatched
+    // list generations may never be reclaimed by a completed fence.
+    ListState state;state.generation=3;auto* key=reinterpret_cast<ID3D12GraphicsCommandList4*>(0xabcdef0);
+    assert(IndexList(key,&state));second.poisoned=false;second.list=key;second.generation=3;
+    state.open=true;assert(ClassifyLease(second,missing)==LeasePhase::Recording&&!Available(second));
+    state.open=false;assert(ClassifyLease(second,missing)==LeasePhase::Recorded&&!Available(second));
+    second.generation=2;assert(ClassifyLease(second,missing)==LeasePhase::Unsafe);
+    second.queue=queue;fence.complete=30;second.lastUsed=0;
+    QueueSamples stale;ReclaimFinished(GetTickCount64()+kReclaimMs,stale);assert(second.list==key);
+    second.generation=3;QueueSamples reclaim;ReclaimFinished(GetTickCount64()+kReclaimMs,reclaim);
+    assert(!second.list&&state.reclaimed&&Available(second,&reclaim));DropLeaseReferences(second);
+    // Reset the test index, without ever publishing/calling a fake COM list.
+    for(size_t i=0;i<listKeys.size();++i)if(listKeys[i].load()==key){listKeys[i]=nullptr;listValues[i]=nullptr;}
+    hair=HairInput{};association=Association{};first=Lease{};second=Lease{};ctx.queues.clear();
+    assert(device.references==1&&queueIdentity.references==1&&fence.references==1&&vertices.references==1&&source.references==1&&newBlas.references==1);
+    // Real Reset release helper: one completion observation for the whole
+    // operation, without discarding an incomplete or wrong-generation lease.
+    ctx.queues[queue].keep=queue;ctx.queues[queue].fence=&fence;fence.complete=10;
+    state.keep.Attach(key);state.generation=4;state.leases={0,1,2};state.hasLeases=true;
+    for(size_t i=0;i<3;++i) {
+        auto& lease=ctx.leases[i];lease.list=key;lease.generation=i==2?3:4;
+        lease.positions=&source;lease.blas=&newBlas;lease.queue=queue;lease.fenceValue=i==0?10:20;
+    }
+    const auto before=fence.queries;QueueSamples reset;ReleaseRecordingLeases(state,reset);
+    assert(fence.queries==before+1&&!first.list&&!first.blas&&!second.list&&second.blas);
+    assert(ctx.leases[2].list==key&&ctx.leases[2].blas&&state.leases.empty()&&!state.hasLeases);
+    state.keep.Detach(); // fake list is never invoked
+    for(size_t i=0;i<3;++i)ctx.leases[i]=Lease{};
+    ctx.queues.clear();
+    // Bounded owner table: off-camera game-owned data is not evicted. A
+    // completed save unload frees all associations, even with shared sources.
+    for(size_t i=0;i<ctx.associations.size();++i) {
+        auto* owner=reinterpret_cast<void*>(0x10000+i*16);auto* slot=FindAssociation(owner);assert(slot);
+        slot->owner=owner;slot->blas=&newBlas;slot->positions=&source;assert(FindAssociation(owner)==slot);
+    }
+    assert(!FindAssociation(reinterpret_cast<void*>(0x98765))&&!FindAssociation(nullptr));
+    QueueSamples retained;EvictReleased(retained);assert(ctx.associations.back().owner);
+    newBlas.Release();QueueSamples unloaded;EvictReleased(unloaded);
+    for(const auto& slot:ctx.associations)assert(!slot.owner&&!slot.blas&&!slot.positions);
+    assert(FindAssociation(reinterpret_cast<void*>(0x10000))==&ctx.associations[0]);
+    assert(newBlas.references==0&&source.references==1&&queueIdentity.references==1&&fence.references==1);
+    // A pool full of in-flight leases never becomes available by guessing
+    // that a save changed; completion is shared but not retained across calls.
+    ctx.queues[queue].keep=queue;ctx.queues[queue].fence=&fence;fence.complete=10;
+    for(auto& lease:ctx.leases){lease.positions=&source;lease.queue=queue;lease.fenceValue=11;}
+    QueueSamples full;const auto polls=fence.queries;
+    for(const auto& lease:ctx.leases)assert(!Available(lease,&full));
+    assert(fence.queries==polls+1);fence.complete=11;
+    for(const auto& lease:ctx.leases)assert(!Available(lease,&full));
+    QueueSamples done;for(auto& lease:ctx.leases){assert(Available(lease,&done));lease=Lease{};}
+    ctx.queues.clear();assert(source.references==1&&queueIdentity.references==1&&fence.references==1);
+}
 void TestResourceMetadata() {
     using namespace witcher_dots;
     HostIdentity device,other;HostResource positions(&device,0x100000),indices(&device,0x200000),replacement(&device,0x300000),foreign(&other,0x400000);
@@ -88,6 +320,7 @@ void TestResourceMetadata() {
 int main() {
     using namespace witcher_dots;
     TestResourceMetadata();
+    TestScopedReuse();TestCheckedSnapshots();TestLeasesAndSaveRetention();
     cpu_profile::Window window;cpu_profile::Sample sample{};
     window.Update(100,sample,1000000);assert(!window.known);
     sample[0]={100000,50};window.Update(600,sample,1000000);assert(!window.known);
@@ -99,8 +332,18 @@ int main() {
     window.Update(10100,sample,1000000);assert(window.known&&window.msPerSecond[0]==0);
     window.Update(10200,sample,0);assert(!window.known);
     const auto beforeTimer=cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls;
+    assert(!cpu_profile::Enabled());
+    {cpu_profile::Timer timer(cpu_profile::Part::Build);}
+    assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls==beforeTimer);
+    cpu_profile::SetEnabled(true);
     {cpu_profile::Timer timer(cpu_profile::Part::Build);timer.Stop();timer.Stop();}
     assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls==beforeTimer+1);
+    {cpu_profile::Timer timer(cpu_profile::Part::Build);cpu_profile::SetEnabled(false);cpu_profile::SetEnabled(true);}
+    assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls==beforeTimer+1);
+    const auto memoryQueries=cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls;
+    {OwnerSources source;std::array<std::byte,profile::kOwnerSize> owner{};assert(ReadOwnerSources(owner.data(),source));}
+    assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls>memoryQueries);
+    cpu_profile::SetEnabled(false);
     for(size_t i=0;i<runtime_policy::kMaxLists;++i) {
         assert(runtime_policy::CanTrack(i));
         const auto key=reinterpret_cast<void*>(0x10000000ull+i*0x800);
@@ -182,7 +425,7 @@ int main() {
     complete=UINT64_MAX;
     assert(fresh.Get(queueB,readFence)==UINT64_MAX);
     assert(fresh.Get(queueB,readFence)==UINT64_MAX&&fenceQueries==6); // removal is not converted into success
-    std::printf("PASS: %zu command-list indices; %zu forwarding slots; concurrent lookup; bounded exact prebuild cache\n",
+    std::printf("PASS: scoped source proofs, nested/thread-local builders, changed frontends/native identities/devices/descriptors, checked reads, save reuse, Reset/reclaim fences, balanced references, bounded owners/leases; %zu list indices; %zu forwarding slots; exact prebuild cache\n",
         runtime_policy::kMaxLists,slots);
     return 0;
 }

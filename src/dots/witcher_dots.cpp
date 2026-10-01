@@ -1,5 +1,6 @@
 #include "witcher_dots.h"
 #include "gpu_runtime.h"
+#include "input_scope.h"
 #include "game_profile.h"
 #include "checked_memory.h"
 #include "../protected_pointer.h"
@@ -37,6 +38,7 @@ struct State {
     double recentHookMsPerSecond{};
     bool recentHookTimeKnown{};
     cpu_profile::Window cpuWindow;
+    uint64_t cpuEpoch{};
     bool preferencesRead{},attempted{},dredEnabled{};
 };
 State& S() {static auto* const state=new State;return *state;}
@@ -86,8 +88,6 @@ using CopyFn=uintptr_t(WINAPI*)(void*,const void*,size_t);
 BuilderFn originalBuilder{};PrebuildFn originalPrebuild{};BuildFn originalBuild{};CopyFn originalCopy{};
 std::array<void*,4> gameTargets{};
 std::array<bool,4> gameEnabled{};
-struct OwnerScope {void* owner{};ID3D12GraphicsCommandList4* list{};bool havePrebuild{};};
-thread_local OwnerScope* ownerScope{};
 void Preferences() {
     auto& state=S();if(state.preferencesRead)return;state.preferencesRead=true;
     std::wstring path(32768,L'\0');
@@ -157,11 +157,10 @@ bool DeviceMatches(ID3D12Device5* device) {
 }
 int32_t WINAPI Builder(void* owner,const void* context) {
     if(!active.load(std::memory_order_acquire))return originalBuilder(owner,context);
-    uint32_t version{};ID3D12GraphicsCommandList4* list{};
-    if(!Readable(owner,profile::kOwnerSize)||!Read(context,0,version)||version!=0x201||!Read(context,8,list)||!list)
+    struct Header {uint32_t version{},pad{};ID3D12GraphicsCommandList4* list{};} header;
+    if(!Readable(owner,profile::kOwnerSize)||!Read(context,0,header)||header.version!=0x201||!header.list)
         return originalBuilder(owner,context);
-    OwnerScope scope{owner,list,false};const auto previous=ownerScope;ownerScope=&scope;
-    struct RestoreScope {OwnerScope* previous;~RestoreScope(){ownerScope=previous;}} restore{previous};
+    OwnerScope scope{owner,header.list};OwnerScopeBinding binding(scope);
     return originalBuilder(owner,context);
 }
 int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) try {
@@ -179,6 +178,7 @@ int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) tr
     if(!PrebuildTriangles(hair,inputs.flags,info)||!CopyChecked(params.info,&info,sizeof(info))) {
         RejectReason("triangle prebuild capacity unavailable");return -1;
     }
+    ownerScope->reuse.input=std::move(hair);ownerScope->reuse.valid=true;
     ownerScope->havePrebuild=true;return 0;
 } catch(...) {StopConversions();return -1;
 }
@@ -190,7 +190,7 @@ int32_t WINAPI Build(ID3D12GraphicsCommandList4* list,const BuildParams* supplie
     BuildParams params{};ExtendedBuild desc{};HairInput hair;std::string error;
     if(!ownerScope||list!=ownerScope->list||!CopyChecked(&params,supplied,sizeof(params))
         ||params.version!=0x10020||params.postCount||params.post||!CopyChecked(&desc,params.desc,sizeof(desc))
-        ||!ReadHairInput(ownerScope->owner,desc.inputs,hair,error)) {
+        ||!ReadHairInput(ownerScope->owner,desc.inputs,hair,error,&ownerScope->reuse)) {
         RejectReason(error.empty()?"build owner/prebuild/layout not established":error);return -1;
     }
     // An unchanged topology may skip the engine's prebuild query on an update.
@@ -439,6 +439,9 @@ Snapshot ReadSnapshot() noexcept {
         out.trackedLists=stats.trackedLists;out.listLimit=stats.listLimit;out.listCapacityMisses=stats.listCapacityMisses;
         out.prebuildCacheHits=stats.prebuildCacheHits;out.prebuildDriverQueries=stats.prebuildDriverQueries;
         out.fenceDriverQueries=stats.fenceDriverQueries;
+        out.inputReuseHits=stats.inputReuseHits;out.inputReuseMisses=stats.inputReuseMisses;
+        out.leasesRecording=stats.leasesRecording;out.leasesRecorded=stats.leasesRecorded;
+        out.leasesPending=stats.leasesPending;out.leasesAvailable=stats.leasesAvailable;out.leasesUnsafe=stats.leasesUnsafe;
         const uint64_t now=GetTickCount64();
         if(stats.lastBuildTick)out.lastBuildAgeMs=now-stats.lastBuildTick;
         if(stats.lastHairTick)out.lastHairAgeMs=now-stats.lastHairTick;
@@ -455,8 +458,11 @@ Snapshot ReadSnapshot() noexcept {
         {
             auto& state=S();std::lock_guard lock(state.lock);
             const uint64_t elapsed=now-state.hookSampleTick;
-            state.cpuWindow.Update(now,cpu_profile::Read(),cpu_profile::Frequency());
-            out.cpuProfileKnown=state.cpuWindow.known;
+            const uint64_t epoch=cpu_profile::epoch.load(std::memory_order_acquire);
+            if(epoch!=state.cpuEpoch) {state.cpuEpoch=epoch;state.cpuWindow={};}
+            out.cpuProfileEnabled=(epoch&1)!=0;
+            if(out.cpuProfileEnabled)state.cpuWindow.Update(now,cpu_profile::Read(),cpu_profile::Frequency());
+            out.cpuProfileKnown=out.cpuProfileEnabled&&state.cpuWindow.known;
             out.cpuMsPerSecond=state.cpuWindow.msPerSecond;out.cpuCallsPerSecond=state.cpuWindow.callsPerSecond;
             if(!state.hookSampleTick||elapsed>5000) {
                 state.hookSampleTick=now;state.hookSampleMicroseconds=out.hookMicroseconds;state.recentHookTimeKnown=false;

@@ -116,7 +116,7 @@ void OnOverlay(reshade::api::effect_runtime*) {
               snapshot.prebuilds, snapshot.builds, snapshot.updates);
   ImGui::Text("Shader libraries translated: %llu", snapshot.shaderLibraries);
   ImGui::Text("TLAS instance copies: %llu", snapshot.instanceCopies);
-  ImGui::Text("Live converted owners / hair instances: %u / %u",
+  ImGui::Text("Retained hair associations / admitted TLAS instances: %u / %u",
               snapshot.liveOwners, snapshot.hairInstances);
   ImGui::Text("Converted geometry: %.1f MiB", MiB(snapshot.geometryBytes));
   ImGui::Text("Hair BLAS / scratch: %.1f / %.1f MiB",
@@ -131,17 +131,26 @@ void OnOverlay(reshade::api::effect_runtime*) {
 
   ImGui::SeparatorText("Performance / Memory");
   if (ImGui::CollapsingHeader("CPU diagnostics (experimental)")) {
+    bool profiling = witcher_dots::cpu_profile::Enabled();
+    if (ImGui::Checkbox("Enable detailed CPU timings (this session only)", &profiling))
+      witcher_dots::cpu_profile::SetEnabled(profiling);
     ImGui::TextWrapped("Elapsed time including waits, summed across threads. Nested rows overlap; do not add them. Not GPU time or CPU utilization.");
-    if (!snapshot.cpuProfileKnown) ImGui::TextUnformatted("Collecting: keep this panel open for at least one second.");
+    if (profiling) ImGui::TextWrapped("Reference rows count instrumented COM blocks, not individual AddRef/Release calls. Unwrap includes its own COM work.");
+    if (!profiling) ImGui::TextUnformatted("Detailed timers are off. Enable only while diagnosing; disable for performance comparisons.");
+    else if (!snapshot.cpuProfileKnown) ImGui::TextUnformatted("Collecting: keep this panel open for at least one second.");
     else for (size_t i = 0; i < witcher_dots::cpu_profile::kCount; ++i)
-      ImGui::Text("%s: %.2f ms/s; %.0f calls/s", witcher_dots::cpu_profile::kLabels[i],
-                  snapshot.cpuMsPerSecond[i], snapshot.cpuCallsPerSecond[i]);
+      ImGui::Text("%s: %.2f ms/s; %.0f calls/s; %.2f us/call", witcher_dots::cpu_profile::kLabels[i],
+                  snapshot.cpuMsPerSecond[i], snapshot.cpuCallsPerSecond[i],
+                  snapshot.cpuCallsPerSecond[i] > 0 ? snapshot.cpuMsPerSecond[i] * 1000.0 / snapshot.cpuCallsPerSecond[i] : 0.0);
   }
   ImGui::Text("Tracked command lists: %u / %u; capacity misses: %llu",
               snapshot.trackedLists, snapshot.listLimit, snapshot.listCapacityMisses);
   ImGui::Text("BLAS size cache hits / driver queries: %llu / %llu",
               snapshot.prebuildCacheHits, snapshot.prebuildDriverQueries);
   ImGui::Text("Queue completion driver queries: %llu", snapshot.fenceDriverQueries);
+  ImGui::Text("Scoped input reuse / full validations: %llu / %llu", snapshot.inputReuseHits, snapshot.inputReuseMisses);
+  ImGui::Text("Leases recording / recorded / awaiting GPU / reusable / unsafe: %u / %u / %u / %u / %u",
+              snapshot.leasesRecording, snapshot.leasesRecorded, snapshot.leasesPending, snapshot.leasesAvailable, snapshot.leasesUnsafe);
   if (snapshot.recentHookTimeKnown)
     ImGui::Text("Recent hair-hook elapsed time: %.2f ms per second (includes waits)",
                 snapshot.recentHookMsPerSecond);

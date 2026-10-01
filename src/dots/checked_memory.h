@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
+#include "cpu_profile.h"
 namespace witcher_dots {
 inline bool Readable(const void* p,size_t size) noexcept {
     const auto start=reinterpret_cast<uintptr_t>(p);
@@ -10,7 +11,7 @@ inline bool Readable(const void* p,size_t size) noexcept {
     uintptr_t at=start;const uintptr_t end=start+size;
     while(at<end) {
         MEMORY_BASIC_INFORMATION m{};
-        if(!VirtualQuery(reinterpret_cast<void*>(at),&m,sizeof(m))||m.State!=MEM_COMMIT
+        if(!cpu_profile::QueryMemory(reinterpret_cast<void*>(at),&m,sizeof(m))||m.State!=MEM_COMMIT
             ||(m.Protect&(PAGE_NOACCESS|PAGE_GUARD))) return false;
         const DWORD access=m.Protect&0xff;
         if(access!=PAGE_READONLY&&access!=PAGE_READWRITE&&access!=PAGE_WRITECOPY

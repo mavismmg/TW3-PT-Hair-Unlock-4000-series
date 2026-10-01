@@ -1,12 +1,87 @@
 # Steam 5.00c local compatibility candidate
 
-Branch: `fix/witcher3-5.00c-compatibility`. No push or release.
+Branch: `feature/witcher3-save-stable-performance`, from `79eeb54`.
+Experimental local candidate. No push or release.
 
 Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
+`D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37`.
+
+Previous installed baseline (`79eeb54`) and verified backup SHA-256:
 `E81F6B3FF27299281E566BDCD044718A440BB7B633B380101633B4E2B0D04A1D`.
+Backup: `build/hotfix-backups/E81F6B3FF27299281E566BDCD044718A440BB7B633B380101633B4E2B0D04A1D.addon64.bak`.
+
+## Save-stable performance candidate
+
+The latest capture shows recent conversion, no rejection, and 11 retained
+associations versus 5 admitted instances. These are different populations:
+this alone establishes neither a failed hair path nor a leak. Input validation
+is about 1.56 ms/call (437.18 ms/s, 281 calls/s), compared with about 2.31 ms/call
+in the earlier capture. Neither capture is a controlled same-scene benchmark.
+
+- Batch adjacent source and AS fields into separate checked owner snapshots.
+  Overflow, page protections and SEH-protected copies remain enforced.
+- Retain source frontends, native resources, canonical identities and prepared
+  device identity only inside the builder's `OwnerScope`. Prebuild/build may
+  share immutable source metadata only after rereading the current descriptor,
+  frontend pointers and native identities. Any mismatch takes full validation.
+  Nested builders and other threads have independent scopes; no owner or raw
+  pointer cache survives the builder, frame or save.
+- BLAS/scratch are always reread and fully approved at build time. AS generation,
+  capacity, native command list, binding and buffer-state checks are unchanged.
+  A matching prebuild/build pair now makes four resource metadata/device queries
+  instead of six; an update without a prebuild still takes full source validation
+  without adding proof references for a nonexistent reuse.
+- Share a conservative fence observation per queue **within** build, Reset,
+  reclamation and TLAS operations. Release completed leases' source references
+  before evaluating obsolete associations. No cross-operation fence cache,
+  camera-based eviction, global save reset or command-list destruction was added.
+- Distinguish retained associations, admitted TLAS instances, recording/recorded
+  leases, leases waiting for GPU, reusable buffers and unsafe leases in the UI.
+- Detailed timers are off by default, session-only and restart their measurement
+  window when enabled. Added VirtualQuery, owner snapshot, geometry descriptor
+  and resource-reference timing, with ms/s, calls/s and mean us/call. Reference
+  rows count instrumented COM blocks (some contain multiple operations); unwrap
+  includes its own COM work. Nested rows must not be added together. Basic hook
+  elapsed time and resource/capacity counters remain available with timers off.
+
+Shaders, shader translation, converter, geometry and exact provider/game profile
+files are byte-for-byte identical to `79eeb54`. Strand counts, four triangles per
+segment, rounded normals, dispatches, BLAS update/rebuild frequency and barriers
+are unchanged. MFG Unlock, game configuration and `docs/` were not modified.
+Original dashdogy / Michael Robles MIT attribution remains intact.
+
+Clean MSVC Debug/Release builds and all five CTest suites passed, followed by
+final rebuilds/tests of the candidate. Installed-game exact profile, four shader
+identities and DXIL translation/finalization/validation passed in both configs.
+Expanded host tests execute real helpers for scoped proofs, descriptor/frontend/
+native/device changes, nested/thread-local builders, read failures, protected
+copies, balanced references, owner-address reuse, shared resources, Reset,
+completed/incomplete/removed fences and bounded owner/lease exhaustion. They do
+not submit GPU work or execute gameplay. Clang-cl was unavailable; MSVC was used.
+
+### Required manual acceptance — NOT YET RUN
+
+For each of three fresh sessions, perform five A -> B -> A cycles:
+
+1. Load A, return to the same scene/camera, warm up 30 seconds, capture 60 seconds.
+2. Load B, warm up and capture with the same durations.
+3. Return to the exact A scene/camera and repeat the measurement.
+4. Keep resolution, HairWorks AA, PT, DLSS/MFG, caps and sync identical. Use
+   FrameView/PresentMon externally for displayed FPS/pacing; record source FPS,
+   median/p95 frame time, VRAM, associations, admitted instances and lease states.
+5. Keep detailed timers **off** for FPS comparisons. Collect a separate timed
+   diagnostic window (at least a second after enabling) for per-call costs.
+6. Compare against the backed-up baseline after a full game restart. Accept
+   only with no repeatable source-FPS loss above 5%, p95 regression above 10%,
+   visual regression, crash or unjustified accumulating resource retention.
+
+GPU utilization is auxiliary evidence, not the acceptance criterion. Runtime
+save stability and performance gains remain unverified; automated passes alone
+do not mean the reported problem is fixed. The following sections describe
+earlier compatibility candidates, not additional changes to this candidate.
 
 ## Follow-up: invocation-local immutable resource metadata
 

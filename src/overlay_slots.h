@@ -3,6 +3,7 @@
 #include "protected_pointer.h"
 
 #include <Windows.h>
+#include "dots/cpu_profile.h"
 
 namespace single_overlay::slots {
 
@@ -11,7 +12,7 @@ inline bool ImageSlot(HMODULE image, void** slot) noexcept {
   const auto address = reinterpret_cast<uintptr_t>(slot);
   return image != nullptr && slot != nullptr &&
          (address % alignof(void*)) == 0 &&
-         VirtualQuery(slot, &memory, sizeof(memory)) == sizeof(memory) &&
+         witcher_dots::cpu_profile::QueryMemory(slot, &memory, sizeof(memory)) == sizeof(memory) &&
          memory.State == MEM_COMMIT && memory.Type == MEM_IMAGE &&
          memory.AllocationBase == image &&
          !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS | PAGE_EXECUTE |
@@ -22,7 +23,7 @@ inline bool ImageSlot(HMODULE image, void** slot) noexcept {
 inline bool ImageEntry(HMODULE image, void* entry) noexcept {
   MEMORY_BASIC_INFORMATION memory{};
   return image != nullptr && entry != nullptr &&
-         VirtualQuery(entry, &memory, sizeof(memory)) == sizeof(memory) &&
+         witcher_dots::cpu_profile::QueryMemory(entry, &memory, sizeof(memory)) == sizeof(memory) &&
          memory.Type == MEM_IMAGE && memory.State == MEM_COMMIT &&
          memory.AllocationBase == image &&
          !(memory.Protect & (PAGE_GUARD | PAGE_NOACCESS)) &&
