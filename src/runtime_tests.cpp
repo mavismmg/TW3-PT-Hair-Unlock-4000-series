@@ -264,6 +264,85 @@ void TestScopedMemory() {
     std::printf("PASS: scoped memory proof: 300 owner snapshots, zero additional VirtualQuery; nested/unknown/out-of-range reads use checked fallback; protection/unmap faults contained\n");
     cpu_profile::SetEnabled(false);
 }
+void TestCurrentPageValidation() {
+    using namespace witcher_dots;
+    cpu_profile::SetEnabled(true);
+    const auto queries=[] {return cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls;};
+    PSAPI_WORKING_SET_EX_BLOCK block{};
+    block.Win32Protection=PAGE_READWRITE;assert(CurrentPageStatus(block)==PageReadStatus::Unknown);
+    block.Valid=1;assert(CurrentPageStatus(block)==PageReadStatus::Readable);
+    for(const DWORD protection:std::array<DWORD,4>{PAGE_NOACCESS,PAGE_EXECUTE,PAGE_READWRITE|PAGE_GUARD,0}) {
+        block.Win32Protection=protection;assert(CurrentPageStatus(block)==PageReadStatus::Rejected);
+    }
+    block.Win32Protection=PAGE_READONLY;block.Bad=1;assert(CurrentPageStatus(block)==PageReadStatus::Rejected);
+    block.Valid=0;assert(CurrentPageStatus(block)==PageReadStatus::Rejected);
+    SYSTEM_INFO info{};GetSystemInfo(&info);const size_t page=info.dwPageSize;
+    auto* memory=static_cast<std::byte*>(VirtualAlloc(nullptr,10*page,MEM_RESERVE|MEM_COMMIT,PAGE_READWRITE));assert(memory);
+    // Touch each page before observing residency. The helper must never fault
+    // pages in merely to discover whether it can safely read them.
+    for(size_t i=0;i<10;++i)memory[i*page]=std::byte{1};
+    unsigned probes{};
+    auto countReal=[&](void* pages,DWORD bytes) noexcept {
+        ++probes;assert(bytes==2*sizeof(PSAPI_WORKING_SET_EX_INFORMATION));
+        const auto* entries=static_cast<PSAPI_WORKING_SET_EX_INFORMATION*>(pages);
+        assert(entries[0].VirtualAddress==memory&&entries[1].VirtualAddress==memory+page);
+        return QueryWorkingSetEx(GetCurrentProcess(),pages,bytes);
+    };
+    auto* crossing=memory+page-16;
+    const auto before=queries();assert(ReadableCurrentPagesWith(crossing,profile::kOwnerSize,countReal));
+    // Confirm actual resident-page metadata can replace the VAD query, without
+    // relying on timing or a simulated authorization in the production helper.
+    assert(probes==1&&queries()==before);
+    {
+        OwnerScope scope{crossing};assert(scope.memory.ValidateCurrentPages(crossing,profile::kOwnerSize));OwnerScopeBinding binding(scope);
+        OwnerSources sources{};OwnerAs as{};const auto validated=queries();
+        for(unsigned i=0;i<100;++i)assert(ReadOwnerSources(crossing,sources)&&ReadOwnerAs(crossing,as));
+        assert(queries()==validated);
+        DWORD old{};assert(VirtualProtect(memory+page,page,PAGE_NOACCESS,&old));
+        assert(!ReadOwnerSources(crossing,sources));
+        assert(!scope.memory.ValidateCurrentPages(crossing,profile::kOwnerSize)&&!scope.memory.Contains(crossing,0,1));
+        assert(VirtualProtect(memory+page,page,PAGE_READWRITE,&old));
+    }
+    auto failing=[](void*,DWORD) noexcept {return FALSE;};
+    auto unknown=[](void* p,DWORD bytes) noexcept {
+        auto* entries=static_cast<PSAPI_WORKING_SET_EX_INFORMATION*>(p);
+        for(size_t i=0;i<bytes/sizeof(entries[0]);++i) {
+            entries[i].VirtualAttributes.Flags=0;
+            // Undefined protection bits must be ignored for Valid=0.
+            entries[i].VirtualAttributes.Win32Protection=PAGE_GUARD;
+        }
+        return TRUE;
+    };
+    const auto fallback=queries();assert(ReadableCurrentPagesWith(memory,page,failing)&&queries()>fallback);
+    const auto absent=queries();assert(ReadableCurrentPagesWith(memory,page,unknown)&&queries()>absent);
+    const auto large=queries();
+    assert(ReadableCurrentPagesWith(memory,10*page,[](void*,DWORD) noexcept {assert(false);return FALSE;})&&queries()>large);
+    assert(!ReadableCurrentPagesWith(nullptr,8,failing)&&!ReadableCurrentPagesWith(memory,0,failing));
+    assert(!ReadableCurrentPagesWith(reinterpret_cast<void*>(UINTPTR_MAX-8),16,failing));
+    DWORD old{};
+    for(const DWORD protection:{PAGE_READONLY,PAGE_READWRITE,PAGE_EXECUTE_READ,PAGE_NOACCESS,PAGE_READWRITE|PAGE_GUARD}) {
+        assert(VirtualProtect(memory+page,page,protection,&old));
+        assert(ReadableCurrentPages(crossing,profile::kOwnerSize)==Readable(crossing,profile::kOwnerSize));
+        if(protection&PAGE_GUARD) {
+            MEMORY_BASIC_INFORMATION region{};assert(VirtualQuery(memory+page,&region,sizeof(region))&&region.Protect&PAGE_GUARD);
+            assert(!ReadableCurrentPagesWith(crossing,profile::kOwnerSize,unknown));
+            assert(VirtualQuery(memory+page,&region,sizeof(region))&&region.Protect&PAGE_GUARD);
+        }
+    }
+    assert(VirtualProtect(memory+page,page,PAGE_READWRITE,&old));
+    assert(VirtualFree(memory+page,page,MEM_DECOMMIT));
+    assert(!ReadableCurrentPages(crossing,profile::kOwnerSize));
+    assert(VirtualFree(memory,0,MEM_RELEASE));
+    assert(!ReadableCurrentPages(crossing,profile::kOwnerSize));
+    // A reused address is validated again; no old protection proof survives.
+    memory=static_cast<std::byte*>(VirtualAlloc(memory,10*page,MEM_RESERVE|MEM_COMMIT,PAGE_NOACCESS));assert(memory);
+    assert(!ReadableCurrentPages(memory,profile::kOwnerSize));
+    assert(VirtualProtect(memory,page,PAGE_READWRITE,&old));memory[0]=std::byte{1};
+    assert(ReadableCurrentPages(memory,profile::kOwnerSize));
+    assert(VirtualFree(memory,0,MEM_RELEASE));
+    cpu_profile::SetEnabled(false);
+    std::printf("PASS: current page protection: resident owner validation without VirtualQuery; every page checked; unknown/API failure/large range use checked fallback; guard preserved; protection/decommit/address reuse validated\n");
+}
 void TestLeasesAndSaveRetention() {
     using namespace witcher_dots;
     HostIdentity device,queueIdentity;HostFence fence;
@@ -389,7 +468,7 @@ void TestResourceMetadata() {
 int main() {
     using namespace witcher_dots;
     TestResourceMetadata();
-    TestScopedReuse();TestCheckedSnapshots();TestScopedMemory();TestLeasesAndSaveRetention();
+    TestScopedReuse();TestCheckedSnapshots();TestScopedMemory();TestCurrentPageValidation();TestLeasesAndSaveRetention();
     cpu_profile::Window window;cpu_profile::Sample sample{};
     window.Update(100,sample,1000000);assert(!window.known);
     sample[0]={100000,50};window.Update(600,sample,1000000);assert(!window.known);

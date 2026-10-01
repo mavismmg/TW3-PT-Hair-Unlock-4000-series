@@ -1,20 +1,73 @@
 # Steam 5.00c local compatibility candidate
 
-Branch: `feature/witcher3-scoped-memory-reads`, from `b891d5a`.
+Branch: `feature/witcher3-resident-page-validation`, from `2157b11`.
 Experimental local candidate. No push or release.
 
 Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
+`2DE783AD5071DCAB6919B9BEDBA1A089AA3C48FB58C7419F611C900E2F8AF44F`.
+
+Previous partially improved candidate (`2157b11`) and verified backup:
 `19F0562B575A39E08A1287354D9F32890BECCB7A3FC73B3BF3D16EF518337605`.
+Backup: `build/hotfix-backups/19F0562B575A39E08A1287354D9F32890BECCB7A3FC73B3BF3D16EF518337605.addon64.bak`.
 
 Previous installed baseline (`b891d5a`) and verified backup SHA-256:
 `D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37`.
 Backup: `build/hotfix-backups/D268C5B4846DD139FF95998424DDD99BFEFA07BAFBF110BB48079265BC402B37.addon64.bak`.
 The earlier `79eeb54` backup (`E81F6B3F...`) is also retained.
 
+## Follow-up: current-page validation of the builder gate
+
+The tester reports that `2157b11` improved post-save GPU utilization from about
+50% to 80%. The new capture shows owner snapshots at 0.01 ms/s, but the separate
+builder gate at 347.21 ms/s (236 calls/s, 1469.86 us/call). VirtualQuery is still
+585.58 ms/s. These overlapping elapsed measurements identify a remaining costly
+gate; they do not prove that it explains all of the performance loss. GPU
+utilization alone is not an acceptance criterion or a controlled A/B result.
+
+The candidate validates the **same complete owner range** and context header
+using a fresh, bounded `QueryWorkingSetEx` observation. Only pages with valid,
+readable Win32 protection and no bad/guard/no-access status authorize reads.
+Each covered page is inspected. Failed queries, unknown/nonresident metadata
+or oversized ranges fall back to the existing full VirtualQuery committed/
+protection/guard check. Undefined protection fields for Valid=0 are ignored.
+No result, raw owner or page permission is cached between calls, frames or saves.
+Actual owner and context copies remain SEH-protected; the scoped owner proof
+expires at builder return as before. This does not remove ordinary COM/table/
+descriptor or publication-protection checks elsewhere in the runtime.
+
+Windows API semantics were checked against Microsoft's
+[page attributes](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-psapi_working_set_ex_block)
+and [QueryWorkingSetEx](https://learn.microsoft.com/en-us/windows/win32/api/psapi/nf-psapi-queryworkingsetex)
+documentation. No other upstream changes or new shader payloads are imported.
+Existing dashdogy / Michael Robles MIT attribution remains intact.
+
+Three diagnostic rows distinguish the current page query, owner range and
+context read. Owner/context rows are nested in the separate builder gate;
+do not add them to that gate or sum overlapping rows. Timers remain session-only
+and disabled by default. The existing hair-hook total does not include the gate.
+
+Five suites passed in MSVC Debug and Release; installed executable/profile and
+DXIL translation/finalization/validation passed in both. Tests exercise actual
+resident-page validation without VirtualQuery, page-spanning ranges, protected
+pages, guard preservation, API failure/unknown-page fallback, oversized/null/
+overflow bounds, later protection changes, decommit/unmap and address reuse.
+Existing nested/thread-local scope and resource/fence lifetime tests also pass.
+Shaders, translation, converter, geometry and game profiles are byte-for-byte
+unchanged from `2157b11`. No MFG, public ABI, game settings or `docs/` changes.
+
+Runtime A -> B -> A validation remains **pending**. Warm each scene for 30 seconds
+and compare source FPS and median/p95 frame times with detailed timers off.
+Then collect separate diagnostic captures with timers on, including the gate,
+owner/context and current-page query rows. Do not claim full save-load recovery
+from the host tests. Build/install are local only, with backup; no push/release.
+
 ## Follow-up: builder-scoped memory reads
+
+The following section records `2157b11`; the tester reported partial improvement,
+not complete recovery, in the subsequent capture described above.
 
 The tester still reported low GPU utilization after loading another save with
 `b891d5a`. In the two diagnostic captures, VirtualQuery increased from 15.98 to

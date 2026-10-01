@@ -6,7 +6,7 @@
 namespace witcher_dots::cpu_profile {
 enum class Part : size_t { Prebuild, Build, Instances, Input, ResourceUnwrap, DeviceIdentity,
     BuildLockWait, TableValidation, Recording, InstanceLockWait, ResourceMetadata, DeviceRelease,
-    MemoryQuery, OwnerRead, DescriptorCopy, ResourceReferences, OwnerGate, Count };
+    MemoryQuery, OwnerRead, DescriptorCopy, ResourceReferences, OwnerGate, ResidentQuery, OwnerRange, BuilderContext, Count };
 inline constexpr size_t kCount=static_cast<size_t>(Part::Count);
 inline constexpr std::array<const char*,kCount> kLabels{
     "Prebuild total", "Build total", "TLAS preparation total", "Input validation (nested)",
@@ -14,7 +14,8 @@ inline constexpr std::array<const char*,kCount> kLabels{
     "List validation (nested)", "Driver command recording (nested)", "TLAS mutex wait (nested)",
     "Resource description/address (nested)", "Resource device Release (nested)",
     "VirtualQuery (nested)", "Owner fields snapshot (nested)", "Geometry descriptor copy (nested)",
-    "Resource reference blocks (nested)", "Builder owner/context gate (separate)"};
+    "Resource reference blocks (nested)", "Builder owner/context gate (separate)",
+    "Current page protection query (nested)", "Builder owner range (nested in gate)", "Builder context read (nested in gate)"};
 struct Value {uint64_t ticks{},calls{};};
 using Sample=std::array<Value,kCount>;
 struct Counters {std::atomic<uint64_t> ticks{},calls{};};

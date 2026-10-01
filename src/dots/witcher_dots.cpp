@@ -161,8 +161,13 @@ int32_t WINAPI Builder(void* owner,const void* context) {
     OwnerScope scope{owner};bool accepted{};
     {
         cpu_profile::Timer gate(cpu_profile::Part::OwnerGate);
-        accepted=scope.memory.Validate(owner,profile::kOwnerSize)
-            &&Read(context,0,header)&&header.version==0x201&&header.list;
+        {cpu_profile::Timer range(cpu_profile::Part::OwnerRange);
+            accepted=scope.memory.ValidateCurrentPages(owner,profile::kOwnerSize);}
+        if(accepted) {
+            cpu_profile::Timer read(cpu_profile::Part::BuilderContext);
+            accepted=ReadableCurrentPages(context,sizeof(header))&&CopyGuarded(&header,context,sizeof(header))
+                &&header.version==0x201&&header.list;
+        }
     }
     if(!accepted)return originalBuilder(owner,context);
     scope.list=header.list;OwnerScopeBinding binding(scope);
