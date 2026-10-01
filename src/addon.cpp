@@ -18,6 +18,7 @@
 
 #include "dots/witcher_dots.h"
 #include "dots/game_profile.h"
+#include "overlay.h"
 #include "single_module.h"
 
 #pragma comment(lib, "bcrypt.lib")
@@ -85,98 +86,10 @@ void OnInitDevice(reshade::api::device* device) {
   witcher_dots::ObserveDevice(native, caller);
 }
 
-const char* YesNo(bool value) { return value ? "Yes" : "No"; }
-
-double MiB(uint64_t bytes) {
-  return static_cast<double>(bytes) / (1024.0 * 1024.0);
-}
-
 void OnOverlay(reshade::api::effect_runtime*) {
   const auto snapshot = witcher_dots::ReadSnapshot();
-  const bool active = snapshot.stage == witcher_dots::Stage::Active;
-  ImGui::TextColored(active ? ImVec4(0.35f, 1.0f, 0.55f, 1.0f)
-                            : ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
-                     "%s", witcher_dots::ActivityText(snapshot));
-
-  ImGui::SeparatorText("Compatibility");
-  ImGui::Text("Witcher 3 process: %s", YesNo(snapshot.applicable));
-  ImGui::Text("Fallback requested: %s", YesNo(snapshot.requested));
-  ImGui::Text("Backend stage: %s", witcher_dots::StageText(snapshot.stage));
-  ImGui::Text("GPU device ID: 0x%04X", snapshot.deviceId);
-  if (snapshot.driverVersion != 0) {
-    ImGui::Text("NVIDIA driver: %u.%02u", snapshot.driverVersion / 100,
-                snapshot.driverVersion % 100);
-  }
-  ImGui::Text("Converter shader ready: %s", YesNo(snapshot.shaderReady));
-  if (snapshot.reason[0] != '\0') ImGui::TextWrapped("Status detail: %s", snapshot.reason);
-
-  ImGui::SeparatorText("Converted Hair");
-  ImGui::Text("Game Path Traced Hair: %s", YesNo(snapshot.gameHairTraced));
-  ImGui::Text("Triangle prebuilds / builds / updates: %llu / %llu / %llu",
-              snapshot.prebuilds, snapshot.builds, snapshot.updates);
-  ImGui::Text("Shader libraries translated: %llu", snapshot.shaderLibraries);
-  ImGui::Text("TLAS instance copies: %llu", snapshot.instanceCopies);
-  ImGui::Text("Retained hair associations / admitted TLAS instances: %u / %u",
-              snapshot.liveOwners, snapshot.hairInstances);
-  ImGui::Text("Converted geometry: %.1f MiB", MiB(snapshot.geometryBytes));
-  ImGui::Text("Hair BLAS / scratch: %.1f / %.1f MiB",
-              MiB(snapshot.hairBlasBytes), MiB(snapshot.hairScratchBytes));
-  ImGui::Text("Rejected conversions: %llu", snapshot.rejected);
-  ImGui::Text("Declined while game setting was Off: %llu",
-              snapshot.declinedWhileOff);
-  if (snapshot.lastBuildAgeMs != UINT64_MAX)
-    ImGui::Text("Last converted build: %llu ms ago", snapshot.lastBuildAgeMs);
-  if (snapshot.lastHairAgeMs != UINT64_MAX)
-    ImGui::Text("Last traced hair instance: %llu ms ago", snapshot.lastHairAgeMs);
-
-  ImGui::SeparatorText("Performance / Memory");
-  if (ImGui::CollapsingHeader("CPU diagnostics (experimental)")) {
-    bool profiling = witcher_dots::cpu_profile::Enabled();
-    if (ImGui::Checkbox("Enable detailed CPU timings (this session only)", &profiling))
-      witcher_dots::cpu_profile::SetEnabled(profiling);
-    ImGui::TextWrapped("Elapsed time including waits, summed across threads. Nested rows overlap; do not add them. Not GPU time or CPU utilization.");
-    if (profiling) ImGui::TextWrapped("Reference rows count instrumented COM blocks, not individual AddRef/Release calls. Unwrap includes its own COM work.");
-    if (!profiling) ImGui::TextUnformatted("Detailed timers are off. Enable only while diagnosing; disable for performance comparisons.");
-    else if (!snapshot.cpuProfileKnown) ImGui::TextUnformatted("Collecting: keep this panel open for at least one second.");
-    else for (size_t i = 0; i < witcher_dots::cpu_profile::kCount; ++i)
-      ImGui::Text("%s: %.2f ms/s; %.0f calls/s; %.2f us/call", witcher_dots::cpu_profile::kLabels[i],
-                  snapshot.cpuMsPerSecond[i], snapshot.cpuCallsPerSecond[i],
-                  snapshot.cpuCallsPerSecond[i] > 0 ? snapshot.cpuMsPerSecond[i] * 1000.0 / snapshot.cpuCallsPerSecond[i] : 0.0);
-  }
-  ImGui::Text("Tracked command lists: %u / %u; capacity misses: %llu",
-              snapshot.trackedLists, snapshot.listLimit, snapshot.listCapacityMisses);
-  ImGui::Text("BLAS size cache hits / driver queries: %llu / %llu",
-              snapshot.prebuildCacheHits, snapshot.prebuildDriverQueries);
-  ImGui::Text("Queue completion driver queries: %llu", snapshot.fenceDriverQueries);
-  ImGui::Text("Scoped input reuse / full validations: %llu / %llu", snapshot.inputReuseHits, snapshot.inputReuseMisses);
-  ImGui::Text("Leases recording / recorded / awaiting GPU / reusable / unsafe: %u / %u / %u / %u / %u",
-              snapshot.leasesRecording, snapshot.leasesRecorded, snapshot.leasesPending, snapshot.leasesAvailable, snapshot.leasesUnsafe);
-  if (snapshot.recentHookTimeKnown)
-    ImGui::Text("Recent hair-hook elapsed time: %.2f ms per second (includes waits)",
-                snapshot.recentHookMsPerSecond);
-  ImGui::Text("Hair-hook elapsed time since launch: %.3f ms",
-              static_cast<double>(snapshot.hookMicroseconds) / 1000.0);
-  ImGui::Text("Pool allocations / reuses / releases: %llu / %llu / %llu",
-              snapshot.poolAllocations, snapshot.poolReturns,
-              snapshot.poolReleases);
-  ImGui::Text("Full rebuilds / evictions: %llu / %llu",
-              snapshot.fullRebuilds, snapshot.evictions);
-  if (snapshot.memoryKnown) {
-    ImGui::Text("Process VRAM / budget: %.0f / %.0f MiB",
-                MiB(snapshot.vramUsage), MiB(snapshot.vramBudget));
-  }
-
-  ImGui::SeparatorText("Experimental warning");
-  ImGui::TextColored(ImVec4(1.0f, 0.45f, 0.2f, 1.0f),
-                     "RTX 40 uses a triangle fallback, not native LSS hardware.");
-  ImGui::TextWrapped(
-      "This is restricted to the exact verified executable, Ada GPU, supported "
-      "driver and known shader hashes. If validation fails, the addon keeps "
-      "the native raster HairWorks path. Remove the addon if the renderer "
-      "becomes unstable.");
-  ImGui::TextWrapped(
-      "Ported from dashdogy/Michael Robles' MIT-licensed RTX40MFG-Unlock DOTS "
-      "implementation (commit 49dc07ba00568c4337d7efc79a4b9e6470289d15).");
+  hair_overlay::Draw(snapshot, witcher_dots::ActivityText(snapshot),
+                     witcher_dots::StageText(snapshot.stage));
 }
 
 }  // namespace

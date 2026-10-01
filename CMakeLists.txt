@@ -41,7 +41,11 @@ if(BUILD_TESTING)
   add_executable(runtime_tests src/runtime_tests.cpp)
   target_compile_options(runtime_tests PRIVATE /bigobj /utf-8)
   target_link_libraries(runtime_tests PRIVATE bcrypt ole32 dxgi psapi version)
-  foreach(test IN ITEMS geometry_tests identity_tests lifecycle_tests hotfix_tests runtime_tests)
+  add_executable(ui_tests src/ui_tests.cpp
+    external/reshade/deps/imgui/imgui.cpp external/reshade/deps/imgui/imgui_draw.cpp
+    external/reshade/deps/imgui/imgui_tables.cpp external/reshade/deps/imgui/imgui_widgets.cpp)
+  target_include_directories(ui_tests SYSTEM PRIVATE external/reshade)
+  foreach(test IN ITEMS geometry_tests identity_tests lifecycle_tests hotfix_tests runtime_tests ui_tests)
     # These tests use assert(), including calls with required side effects.
     target_compile_options(${test} PRIVATE /UNDEBUG)
     target_compile_definitions(${test} PRIVATE NOMINMAX)
@@ -51,4 +55,5 @@ if(BUILD_TESTING)
   add_test(NAME addon_lifecycle COMMAND lifecycle_tests $<TARGET_FILE:witcher3-pthairunlock>)
   add_test(NAME hotfix_compatibility COMMAND hotfix_tests)
   add_test(NAME runtime_capacity_and_cache COMMAND runtime_tests)
+  add_test(NAME compact_overlay COMMAND ui_tests)
 endif()

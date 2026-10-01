@@ -1,4 +1,9 @@
-# Steam 5.00c local compatibility candidate
+# Archived Steam 5.00c development / validation notes
+
+The tester subsequently confirmed that the `5564163` save-load performance fix
+worked. Release 1.0.0 preserves that backend and adds a compact overlay; see
+[release notes](RELEASE-1.0.0.md) and [current download hashes](downloads/README.md).
+The candidate hashes and pending-validation statements below are historical.
 
 Branch: `feature/witcher3-resident-page-validation`, from `2157b11`.
 Experimental local candidate. No push or release.

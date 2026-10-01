@@ -16,7 +16,7 @@ Michael Robles, under the MIT License. See `LICENSE.dashdogy-MIT.txt`.
 ## Supported test configuration
 
 - Executable: `bin/x64_dx12/witcher3.exe`
-- Version: `5.0.0.1044392` (Steam 5.00c, local hotfix candidate)
+- Version: `5.0.0.1044392` (Steam 5.00c, release 1.0.0)
 - SHA-256: `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`
 - Renderer: Direct3D 12
 - GPU: NVIDIA Ada / RTX 40
@@ -32,9 +32,9 @@ points or shader hashes differ from the verified profile.
 2. Install `renodx-witcher3-pthairunlock.addon64` beside the DX12 executable.
 3. Start the game with Path Tracing, DLSS Ray Reconstruction and HairWorks on.
 4. Set **Path Traced Hair** to **On** and load a HairWorks character or animal.
-5. Open the ReShade overlay and verify:
+5. Open the ReShade overlay; expand **Support / Diagnostics** for counters:
    - `Backend stage: prepared`;
-   - `Game Path Traced Hair: Yes`;
+   - `Game Path Traced Hair: On`;
    - triangle `prebuilds` and `builds` increase;
    - `hair instances` becomes non-zero while hair is visible;
    - the status becomes `active (tracing converted hair)`.

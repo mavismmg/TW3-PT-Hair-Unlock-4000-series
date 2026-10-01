@@ -10,16 +10,16 @@ project ports his MIT-licensed work to a separate RenoDX/ReShade addon, with
 ReShade device-lifecycle and native-resource ownership fixes. It does not
 claim authorship of the original DOTS implementation.
 
-**Local hotfix candidate:** this branch targets Steam 5.00c, executable
-`5.0.0.1044392`. The public download links below still refer to the previous
-`5.0.0.1041720` build and are not compatible with this game update. The candidate
-is built under `build/Release`; it has not been published or runtime-approved.
+**Release 1.0.0:** targets the exact Steam 5.00c executable `5.0.0.1044392`.
+The local RTX 4070 SUPER tester confirmed the save-load performance fix.
+This remains experimental and build-specific; that result is not a guarantee
+of stability or performance on every system.
 
 ## Download and installation
 
-[Download the experimental package](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/raw/refs/heads/main/downloads/TW3-PT-Hair-Unlock-RTX40-experimental.zip)
+[Download release 1.0.0](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/tag/v1.0.0)
 (addon, instructions and license notices).
-[Individual addon file](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/raw/refs/heads/main/downloads/renodx-witcher3-pthairunlock.addon64).
+[Individual addon file](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/download/v1.0.0/renodx-witcher3-pthairunlock.addon64).
 
 1. Close the game and back up `Documents\The Witcher 3\dx12user.settings`.
 2. Install the **ReShade build with full add-on support** for the game's DX12
@@ -31,8 +31,8 @@ is built under `build/Release`; it has not been published or runtime-approved.
    **NVIDIA HairWorks**, and then **Path Traced Hair** in the game's menu.
 5. Load a scene with HairWorks hair, such as Geralt or Roach. Open ReShade's
    **Witcher 3 Path Traced Hair** panel and check for
-   `active (tracing converted hair)`, increasing triangle builds and non-zero
-   hair instances.
+   `active (tracing converted hair)`. Additional counters and **Copy diagnostics**
+   are under the collapsed **Support / Diagnostics** section.
 
 Do not run this alongside RTXMFG's Witcher DOTS backend or another PT Hair
 unlocker. Both would hook the same game/renderer paths. This addon does not
@@ -66,9 +66,11 @@ libraries. Unsupported LSS-only shader paths remain disabled.
 ## Experimental status and performance
 
 Runtime counters confirmed converted hair builds and admission into ray
-tracing on the previous game build. The 5.00c candidate still requires a new
-runtime test, controlled Off/On visual comparison and stability/performance
-assessment. Passing offline shader validation does not prove gameplay safety.
+tracing on 5.00c. The local tester reported recovery of the post-save performance
+loss after the builder-scoped/current-page validation changes. Visual shaders,
+geometry density and update frequency remain unchanged from the tested baseline.
+Broader controlled Off/On comparisons and stability testing are still encouraged;
+passing offline shader validation alone does not prove gameplay safety.
 
 - Conversion, BLAS updates and tracing add CPU/GPU cost and VRAM usage.
   The reported test with five live hair owners used approximately **938 MiB**
@@ -76,11 +78,12 @@ assessment. Passing offline shader validation does not prove gameplay safety.
   fixed memory requirement or total addon overhead measurement.
 - [CDPR has acknowledged a HairWorks performance issue](https://support.cdprojektred.com/en/witcher-3/pc/sp-technical/issue/3015/performance-issues-related-to-nvidia-hairworks).
   This addon does not claim to fix that game issue.
-- A tester reported lower GPU utilization with PT Hair on the Steam version.
-  The cause and whether it is store-specific remain unverified. No fix is
-  claimed here.
-- The overlay's CPU hook time is **cumulative since launch**, not per-frame
-  latency. Use controlled captures to assess performance.
+- Save-load validation overhead was reduced without retaining raw-owner or
+  page-permission caches between frames/saves. Unknown page information uses
+  the full checked fallback. This does not establish a Steam-specific engine bug.
+- Advanced timings are off by default and session-only. They measure elapsed
+  time including waits, with overlapping nested rows, not CPU utilization or
+  GPU time. Disable them for FPS comparisons.
 
 Compare Off/On with identical camera, lighting, resolution and settings. Test
 gameplay, cutscenes, fast travel, resolution changes and a clean restart.
@@ -117,6 +120,11 @@ before building/replacing a loaded addon. Automated tests cover geometry,
 native/proxy device identity and 32 addon unload/reload cycles; they do not
 simulate the actual renderer or prove visual correctness.
 
+The six test suites also cover scoped input/memory validation, save/resource
+address reuse, fence and lease retention, bounded caches and compact/expanded
+ImGui rendering at 100% and 150% scale. The clean UI is presentation-only; the
+release preserves the approved renderer/converter payloads.
+
 The additional `hotfix_compatibility` test rejects altered PE layouts, hook
 entries, gates, callers and configuration structures. Optional validation of
 the installed executable runs no game entry point and checks all four embedded
@@ -128,15 +136,17 @@ shader identities, translation, DXIL finalization, validation and the converter:
 
 The original RenoDX integration snapshot is
 `98934e0f68d1d3ae2027fc6299fb3e8631cc66b4`. This branch adapts that port to
-5.00c; geometry conversion and public device ownership handling are unchanged.
+5.00c and optimizes invocation-local validation; visual geometry conversion and
+public device ownership handling are unchanged.
 No MFG Unlock code or unrelated RenoDX documentation is published here.
 
 The 5.00c compatibility profile was independently checked against the installed
 executable and dashdogy's user-provided `RTXMFG.dll` **1.4.0.42** (SHA-256
 `0BFC8C2FA07A309026EED461D57566CDAFFB03E28D38E5CA6DB65445CDCA02DE`).
-That DLL is a reference, not a dependency or redistributed binary. Its reported
-GPU-utilization fixes have not been independently verified or claimed by this
-port. Do not load both implementations together: they hook the same renderer.
+That DLL is a reference, not a dependency or redistributed binary. The guarded
+owner-read optimization was also informed by upstream v1.4.1
+([commit `866f491`](https://github.com/dashdogy/RTX40MFG-Unlock/tree/866f491f9b899fbe46730c3213d2fe85a8ac8e40)).
+Do not load both implementations together: they hook the same renderer.
 
 ## Credits and licenses
 
@@ -146,8 +156,10 @@ port. Do not load both implementations together: they hook the same renderer.
   [RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock), specifically
   [commit `49dc07b`](https://github.com/dashdogy/RTX40MFG-Unlock/tree/49dc07ba00568c4337d7efc79a4b9e6470289d15/source/native/witcher_dots).
   Copyright (c) 2026 Michael Robles; [MIT license](licenses/dashdogy-MIT.txt).
+  Additional guarded-read performance reference: upstream v1.4.1, `866f491`.
 - **mavismmg** - RenoDX/ReShade addon port, boot lifecycle and proxy-device
-  ownership fixes, integration and local testing.
+  ownership fixes, scoped validation/performance improvements, interface and
+  local testing.
 - **[Carlos Lopez Jr. / RenoDX contributors](https://github.com/clshortfuse/renodx)**
   - original addon development/build environment; [MIT notice](licenses/RenoDX-MIT.txt).
 - **[Patrick Mours / ReShade contributors](https://github.com/crosire/reshade)**

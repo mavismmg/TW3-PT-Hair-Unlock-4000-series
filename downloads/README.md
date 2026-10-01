@@ -1,20 +1,22 @@
-# Tested experimental build
+# Release 1.0.0 — Steam 5.00c / RTX 40
 
-`TW3-PT-Hair-Unlock-RTX40-experimental.zip` bundles the addon below,
-installation instructions and the project/third-party license notices.
+[Download the GitHub release](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/tag/v1.0.0).
 
-File: `renodx-witcher3-pthairunlock.addon64` (547,840 bytes).
+`TW3-PT-Hair-Unlock-RTX40-experimental.zip` is the repository mirror of the
+release package `TW3-PT-Hair-Unlock-RTX40-v1.0.0.zip`. It includes the addon,
+installation/recovery instructions, release notes and all license notices.
+
+File: `renodx-witcher3-pthairunlock.addon64` (599,552 bytes).
 
 SHA-256:
-`982F90EB50D6EDC9ACC1D9F0CCEC4A6016B420C81D670CBCC0CC0AD77918138C`
+`619870C34D836F6721A9F7EC3652044DC5AADF1338E819972DBC1F1897C70274`
 
-This is the existing MSVC Release artifact from RenoDX integration commit
-`98934e0f68d1d3ae2027fc6299fb3e8631cc66b4`, used in the successful local
-RTX 4070 SUPER runtime test. It is not a rebuilt replacement or a claim of
-completed stability/performance validation. Standalone builds may produce
-different binary hashes.
+Built locally with MSVC Release; six Debug/Release suites and installed-game
+profile/DXIL validation passed. Local testing confirmed the save-load
+performance fix on RTX 4070 SUPER. This is still experimental and limited to
+the exact Steam 5.00c DX12 `5.0.0.1044392` executable fingerprint.
 
 Follow the [installation and recovery instructions](../README.md).
 Retain the [third-party notices](../licenses/) when redistributing the binary.
-No game executable, game shaders, NVIDIA DLLs or complete provider packages
-are distributed here.
+Do not combine it with RTXMFG's Witcher DOTS backend or another PT Hair unlocker.
+No game executable or NVIDIA DLL/provider package is distributed.
