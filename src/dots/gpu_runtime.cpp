@@ -3,6 +3,7 @@
 #include "runtime_policy.h"
 #include "prebuild_cache.h"
 #include "fence_samples.h"
+#include "cpu_profile.h"
 #include "checked_memory.h"
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
@@ -1046,12 +1047,16 @@ void Restore(ID3D12GraphicsCommandList4* list,const Bindings& b,const RootInfo* 
 bool Resource(void* owner,size_t offset,ComPtr<ID3D12Resource>& out,std::string* error=nullptr) {
     IUnknown* p{};const char* reason=nullptr;
     if(!Read(owner,offset,p)||!p)reason="resource pointer missing/unreadable";
-    else if(!Unwrap(p,out))reason="resource public COM unwrap failed";
     else {
-        ComPtr<ID3D12Device> device;
-        if(FAILED(out->GetDevice(IID_PPV_ARGS(&device))))reason="resource GetDevice failed";
-        else if(!OwnedDevice(device.Get()))reason="resource native device identity mismatch";
-        else if(out->GetDesc().Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
+        {cpu_profile::Timer profile(cpu_profile::Part::ResourceUnwrap);
+            if(!Unwrap(p,out))reason="resource public COM unwrap failed";}
+        if(!reason) {
+            ComPtr<ID3D12Device> device;
+            {cpu_profile::Timer profile(cpu_profile::Part::DeviceIdentity);
+                if(FAILED(out->GetDevice(IID_PPV_ARGS(&device))))reason="resource GetDevice failed";
+                else if(!OwnedDevice(device.Get()))reason="resource native device identity mismatch";}
+            if(!reason&&out->GetDesc().Dimension!=D3D12_RESOURCE_DIMENSION_BUFFER)reason="resource is not a buffer";
+        }
     }
     if(!reason)return true;
     if(error) {
@@ -1127,6 +1132,7 @@ void StopConversions() noexcept {
     try {std::lock_guard lock(C().lock);Lost();} catch(...) {}
 }
 bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error) {
+    cpu_profile::Timer profile(cpu_profile::Part::Input);
     if(!owner||inputs.type!=1||inputs.count!=1||inputs.layout!=0||inputs.stride!=168
         ||(inputs.flags!=7&&inputs.flags!=0x27)||!CopyChecked(&out.geometry,inputs.geometry,sizeof(out.geometry))) {error="unknown LSS descriptor";return false;}
     out.owner=owner;
@@ -1184,11 +1190,13 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     }
     if(!Resource(hair.owner,profile::kBlasOffset,hair.blas,&error)) {error="hair BLAS buffer: "+error;return false;}
     if(!Resource(hair.owner,profile::kScratchOffset,hair.scratch,&error)) {error="hair scratch buffer: "+error;return false;}
-    auto& ctx=C();std::lock_guard lock(ctx.lock);
+    auto& ctx=C();cpu_profile::Timer wait(cpu_profile::Part::BuildLockWait);
+    std::lock_guard lock(ctx.lock);wait.Stop();
     auto* list=List(native.Get());
     // No compute root signature since Reset (null) leaves nothing to restore;
     // a bound but unregistered one cannot be restored and is rejected.
-    const bool tableValid=list&&CurrentListTable(*list);
+    bool tableValid{};
+    {cpu_profile::Timer profile(cpu_profile::Part::TableValidation);tableValid=list&&CurrentListTable(*list);}
     const bool rootBound=list&&list->bindings->root;
     const RootInfo* bound=rootBound?FindRoot(list->bindings->root.Get()):nullptr;
     if(ctx.stats.lost||!list||!tableValid||!list->open||!list->bindings->valid||!list->bindings->pipelineKnown
@@ -1313,6 +1321,7 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     list->hasLeases.store(true,std::memory_order_release);
     injecting=true;
     struct Injection {~Injection(){injecting=false;}} injection;
+    cpu_profile::Timer recording(cpu_profile::Part::Recording);
     // With the opt-in removal report, name this runtime's commands in DRED.
     const bool marked=removalReportArmed.load(std::memory_order_acquire);
     if(marked) {static constexpr wchar_t text[]=L"WitcherDOTS hair conversion";native->SetMarker(0,text,sizeof(text));}
@@ -1353,6 +1362,7 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     if(marked) {static constexpr wchar_t text[]=L"WitcherDOTS triangle BLAS build";native->SetMarker(0,text,sizeof(text));}
     native->BuildRaytracingAccelerationStructure(&build,0,nullptr);
     Original<BarrierFn>(native.Get(),26)(native.Get(),1,asBarriers);
+    recording.Stop();
     association->owner=hair.owner;association->blas=hair.blas;association->positions=hair.positions;association->indices=hair.indices;
     association->address=desc.destination;association->bytes=blasDesc.Width;association->scratchBytes=scratchDesc.Width;
     association->segments=hair.plan.segments;association->vertices=hair.geometry.vertexCount;association->flags=desc.inputs.flags&~0x20u;
@@ -1369,7 +1379,8 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     ++ctx.stats.builds;if(update)++ctx.stats.updates;return true;
 }
 bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool hairTraced) {
-    auto& ctx=C();std::lock_guard lock(ctx.lock);
+    auto& ctx=C();cpu_profile::Timer wait(cpu_profile::Part::InstanceLockWait);
+    std::lock_guard lock(ctx.lock);wait.Stop();
     if(instances.size()>4096) {Reject();return false;}
     // No hair builds run while the game's hair is disabled; the TLAS copy
     // still runs, so destroyed hair is released here as well.

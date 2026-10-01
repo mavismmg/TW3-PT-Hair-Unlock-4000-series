@@ -36,6 +36,7 @@ struct State {
     uint64_t hookSampleTick{},hookSampleMicroseconds{};
     double recentHookMsPerSecond{};
     bool recentHookTimeKnown{};
+    cpu_profile::Window cpuWindow;
     bool preferencesRead{},attempted{},dredEnabled{};
 };
 State& S() {static auto* const state=new State;return *state;}
@@ -166,6 +167,7 @@ int32_t WINAPI Builder(void* owner,const void* context) {
 int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) try {
     if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),profile::kPrebuildReturnRva))return originalPrebuild(device,supplied);
     HookTimer timer;
+    cpu_profile::Timer profile(cpu_profile::Part::Prebuild);
     if(!HairTracedNow()) {declinedWhileOff.fetch_add(1,std::memory_order_relaxed);return -1;}
     PrebuildParams params{};ExtendedInputs inputs{};HairInput hair;std::string error;
     if(!ownerScope||!DeviceMatches(device)||!CopyChecked(&params,supplied,sizeof(params))||params.version!=0x10018
@@ -183,6 +185,7 @@ int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) tr
 int32_t WINAPI Build(ID3D12GraphicsCommandList4* list,const BuildParams* supplied) try {
     if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),profile::kBuildReturnRva))return originalBuild(list,supplied);
     HookTimer timer;
+    cpu_profile::Timer profile(cpu_profile::Part::Build);
     if(!HairTracedNow()) {declinedWhileOff.fetch_add(1,std::memory_order_relaxed);return -1;}
     BuildParams params{};ExtendedBuild desc{};HairInput hair;std::string error;
     if(!ownerScope||list!=ownerScope->list||!CopyChecked(&params,supplied,sizeof(params))
@@ -218,6 +221,7 @@ uintptr_t WINAPI Copy(void* destination,const void* source,size_t bytes) {
             auto instances=std::span(state.instanceWorkspace.data(),part/stride);
             {
                 HookTimer timer; // DOTS's own work only, not the game's copy.
+                cpu_profile::Timer profile(cpu_profile::Part::Instances);
                 if(!part||!CopyChecked(state.instanceWorkspace.data(),static_cast<const std::byte*>(source)+at,part)) {
                     StopConversions();RejectReason("hair instance source changed during copy");
                     return originalCopy(destination,source,bytes);
@@ -451,6 +455,9 @@ Snapshot ReadSnapshot() noexcept {
         {
             auto& state=S();std::lock_guard lock(state.lock);
             const uint64_t elapsed=now-state.hookSampleTick;
+            state.cpuWindow.Update(now,cpu_profile::Read(),cpu_profile::Frequency());
+            out.cpuProfileKnown=state.cpuWindow.known;
+            out.cpuMsPerSecond=state.cpuWindow.msPerSecond;out.cpuCallsPerSecond=state.cpuWindow.callsPerSecond;
             if(!state.hookSampleTick||elapsed>5000) {
                 state.hookSampleTick=now;state.hookSampleMicroseconds=out.hookMicroseconds;state.recentHookTimeKnown=false;
             } else if(elapsed>=1000) {

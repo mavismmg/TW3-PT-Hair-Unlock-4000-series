@@ -130,6 +130,13 @@ void OnOverlay(reshade::api::effect_runtime*) {
     ImGui::Text("Last traced hair instance: %llu ms ago", snapshot.lastHairAgeMs);
 
   ImGui::SeparatorText("Performance / Memory");
+  if (ImGui::CollapsingHeader("CPU diagnostics (experimental)")) {
+    ImGui::TextWrapped("Elapsed time including waits, summed across threads. Nested rows overlap; do not add them. Not GPU time or CPU utilization.");
+    if (!snapshot.cpuProfileKnown) ImGui::TextUnformatted("Collecting: keep this panel open for at least one second.");
+    else for (size_t i = 0; i < witcher_dots::cpu_profile::kCount; ++i)
+      ImGui::Text("%s: %.2f ms/s; %.0f calls/s", witcher_dots::cpu_profile::kLabels[i],
+                  snapshot.cpuMsPerSecond[i], snapshot.cpuCallsPerSecond[i]);
+  }
   ImGui::Text("Tracked command lists: %u / %u; capacity misses: %llu",
               snapshot.trackedLists, snapshot.listLimit, snapshot.listCapacityMisses);
   ImGui::Text("BLAS size cache hits / driver queries: %llu / %llu",

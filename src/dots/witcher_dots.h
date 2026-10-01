@@ -2,6 +2,7 @@
 #include <Windows.h>
 #include <d3d12.h>
 #include <cstdint>
+#include "cpu_profile.h"
 namespace witcher_dots {
 enum class Stage : uint32_t { Disabled,WaitingForDevice,Preparing,UnsupportedGame,UnsupportedGpu,NativeLss,Failed,Active,UnsupportedDriver };
 struct Snapshot {
@@ -19,6 +20,8 @@ struct Snapshot {
     uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
     double recentHookMsPerSecond{};
     bool recentHookTimeKnown{};
+    bool cpuProfileKnown{};
+    std::array<double,cpu_profile::kCount> cpuMsPerSecond{},cpuCallsPerSecond{};
     bool crashReportRequested{},crashReportArmed{},gameHairTraced{},memoryKnown{};
     char reason[256]{};
 };

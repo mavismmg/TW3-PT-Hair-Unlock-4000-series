@@ -6,7 +6,28 @@ Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
-`E76BE3A2CEC5E4E4871899D1EEF3522FF26837FA87B92E0F355849A841E0AC7A`.
+`CB8F6B3CD1E0C55F6BFB18C71C004E9716C97668B042CF4BA5935F0D0F245E74`.
+
+## Follow-up: diagnostic-only CPU stage timings
+
+The tester reports lower GPU utilization with `d4fd4c0`. Its screenshot shows
+active converted hair, five live owners/instances, no rejection/capacity miss,
+1330 size-cache hits versus 10 queries, and 690.95 aggregate hook ms/s.
+This does not establish CPU occupancy, a particular bottleneck, or a quantified
+performance regression without same-scene FPS/frame-time comparison.
+
+This candidate adds elapsed-time/call-rate rows under `CPU diagnostics
+(experimental)`: prebuild, build, TLAS preparation, input validation, resource
+unwrapping, resource-device identity, build/TLAS mutex wait, list validation and
+driver command recording. Nested rows overlap and must not be summed. Timers
+include waits and aggregate across threads; they do not measure GPU execution.
+The instrumentation itself has a small CPU cost and is diagnostic, not a fix.
+No shader, geometry, GPU command, synchronization or lifetime policy changed.
+
+Keep the panel open for at least a second, then capture its rows and FPS/GPU
+utilization in a static scene with hair On and Off. Repeat with the previous
+backed-up candidate after a complete restart to quantify the alleged regression.
+No utilization improvement is claimed before these measurements.
 
 ## Follow-up: tracking exhaustion and CPU-side optimization
 

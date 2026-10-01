@@ -16,6 +16,19 @@ void Log(const wchar_t* text) noexcept {if(text)std::wprintf(L"%ls\n",text);}
 
 int main() {
     using namespace witcher_dots;
+    cpu_profile::Window window;cpu_profile::Sample sample{};
+    window.Update(100,sample,1000000);assert(!window.known);
+    sample[0]={100000,50};window.Update(600,sample,1000000);assert(!window.known);
+    window.Update(1100,sample,1000000);
+    assert(window.known&&window.msPerSecond[0]==100.0&&window.callsPerSecond[0]==50.0);
+    sample[0]={300000,100};window.Update(3100,sample,1000000);
+    assert(window.known&&window.msPerSecond[0]==100.0&&window.callsPerSecond[0]==25.0);
+    window.Update(9100,sample,1000000);assert(!window.known&&window.msPerSecond[0]==0);
+    window.Update(10100,sample,1000000);assert(window.known&&window.msPerSecond[0]==0);
+    window.Update(10200,sample,0);assert(!window.known);
+    const auto beforeTimer=cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls;
+    {cpu_profile::Timer timer(cpu_profile::Part::Build);timer.Stop();timer.Stop();}
+    assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::Build)].calls==beforeTimer+1);
     for(size_t i=0;i<runtime_policy::kMaxLists;++i) {
         assert(runtime_policy::CanTrack(i));
         const auto key=reinterpret_cast<void*>(0x10000000ull+i*0x800);
