@@ -33,6 +33,9 @@ struct State {
     ComPtr<IDXGIAdapter3> memoryAdapter;
     DXGI_QUERY_VIDEO_MEMORY_INFO local{},shared{};
     uint64_t memorySampled{};
+    uint64_t hookSampleTick{},hookSampleMicroseconds{};
+    double recentHookMsPerSecond{};
+    bool recentHookTimeKnown{};
     bool preferencesRead{},attempted{},dredEnabled{};
 };
 State& S() {static auto* const state=new State;return *state;}
@@ -429,6 +432,9 @@ Snapshot ReadSnapshot() noexcept {
         if(!out.applicable)return out;
         const auto stats=ReadRuntimeStats();out.prebuilds=stats.prebuilds;out.builds=stats.builds;out.updates=stats.updates;
         out.rejected=stats.rejected;out.shaderLibraries=stats.shaderLibraries;out.instanceCopies=stats.instanceCopies;out.geometryBytes=stats.geometryBytes;
+        out.trackedLists=stats.trackedLists;out.listLimit=stats.listLimit;out.listCapacityMisses=stats.listCapacityMisses;
+        out.prebuildCacheHits=stats.prebuildCacheHits;out.prebuildDriverQueries=stats.prebuildDriverQueries;
+        out.fenceDriverQueries=stats.fenceDriverQueries;
         const uint64_t now=GetTickCount64();
         if(stats.lastBuildTick)out.lastBuildAgeMs=now-stats.lastBuildTick;
         if(stats.lastHairTick)out.lastHairAgeMs=now-stats.lastHairTick;
@@ -436,14 +442,24 @@ Snapshot ReadSnapshot() noexcept {
         out.poolAllocations=stats.poolAllocations;out.poolReleases=stats.poolReleases;out.poolReturns=stats.reclaims;out.fullRebuilds=stats.fullRebuilds;
         out.hairBlasBytes=stats.hairBlasBytes;out.hairScratchBytes=stats.hairScratchBytes;
         out.declinedWhileOff=declinedWhileOff.load(std::memory_order_relaxed);
-        LARGE_INTEGER frequency{};
-        if(QueryPerformanceFrequency(&frequency)&&frequency.QuadPart>0) {
-            const uint64_t ticks=hookTicks.load(std::memory_order_relaxed),hz=static_cast<uint64_t>(frequency.QuadPart);
+        static const uint64_t hz=[] {LARGE_INTEGER f{};return QueryPerformanceFrequency(&f)&&f.QuadPart>0?static_cast<uint64_t>(f.QuadPart):0ull;}();
+        if(hz) {
+            const uint64_t ticks=hookTicks.load(std::memory_order_relaxed);
             out.hookMicroseconds=ticks/hz*1000000+ticks%hz*1000000/hz;
         }
         out.gameHairTraced=out.stage==Stage::Active&&GameHairTraced();
         {
             auto& state=S();std::lock_guard lock(state.lock);
+            const uint64_t elapsed=now-state.hookSampleTick;
+            if(!state.hookSampleTick||elapsed>5000) {
+                state.hookSampleTick=now;state.hookSampleMicroseconds=out.hookMicroseconds;state.recentHookTimeKnown=false;
+            } else if(elapsed>=1000) {
+                // Sum of hook elapsed times across threads, including lock
+                // waits: not GPU time, CPU occupancy or a per-frame latency.
+                state.recentHookMsPerSecond=static_cast<double>(out.hookMicroseconds-state.hookSampleMicroseconds)/elapsed;
+                state.recentHookTimeKnown=true;state.hookSampleTick=now;state.hookSampleMicroseconds=out.hookMicroseconds;
+            }
+            out.recentHookMsPerSecond=state.recentHookMsPerSecond;out.recentHookTimeKnown=state.recentHookTimeKnown;
             if(state.memoryAdapter&&(!state.memorySampled||now-state.memorySampled>=500)) {
                 state.memorySampled=now;
                 if(FAILED(state.memoryAdapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&state.local))

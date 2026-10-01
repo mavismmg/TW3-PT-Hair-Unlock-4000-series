@@ -6,7 +6,46 @@ Target: `5.0.0.1044392`, executable SHA-256
 `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Release addon SHA-256:
-`2C5F27BA1FB51E89A28A1AD5C380EC88728DC93EC034B394FDBB5078AF72D324`.
+`E76BE3A2CEC5E4E4871899D1EEF3522FF26837FA87B92E0F355849A841E0AC7A`.
+
+## Follow-up: tracking exhaustion and CPU-side optimization
+
+The runtime log after the first candidate recorded `list tracking capacity
+reached` immediately before `native command list unwrapping unavailable`.
+Hair builds had succeeded before this event. This explains the later raster
+fallback; menu activation alone did not establish ongoing traced hair.
+
+- Increased retained-list capacity from 256 to 2048; expanded the lock-free
+  index and original-method publication tables together. Capacity misses and
+  occupancy are now visible. Retention remains bounded and is not a general
+  reclamation solution; long sessions can still exhaust it. Freeing privately
+  instrumented lists requires proof that CPU forwarders and GPU leases no
+  longer reference them, and is intentionally not forced by this patch.
+- Added a 64-entry, per-device exact prebuild-size cache keyed by triangle
+  vertex count and build flags. Invalid/failed queries are not cached. This
+  only avoids repeated CPU driver queries; geometry, allocations' minimum
+  sizes, GPU dispatches and BLAS build/refit policy are unchanged.
+- Reused BLAS/scratch descriptions within one conversion instead of querying
+  the same immutable description repeatedly.
+- Kept the full command-list vtable/protection validation before injection,
+  removing its duplicate scan during wrapper resolution. Retained list origin,
+  identity, lifetime and device ownership remain established by native hooks.
+- Added operation-local fence snapshots. Older completed values can delay
+  reuse, never authorize incomplete work. No CPU waits, GPU ordering changes,
+  submission changes or cross-operation completion cache were added.
+- Fixed missing rejection counts and stale displayed hair-instance counts.
+  Added recent aggregate hook elapsed time (including lock waits), prebuild
+  cache/query counts and completion-query counts. These are not GPU timings
+  or per-frame/end-to-end latency measurements.
+
+No shader, rounded-normal, converter or geometry payload changed from
+`c846a05`. The low GPU utilization itself is **not yet confirmed fixed**.
+
+Five CTest suites passed in Debug and Release. The new test exercises the real
+internal indices with 2048 entries, two full publication generations per list,
+concurrent reads, altered identities/hooks, exact cache keys, failed queries,
+bounded replacement, per-device separation and conservative fence snapshots.
+The optional installed-game DXIL/profile validation also passed.
 
 ## Changes
 
@@ -32,8 +71,8 @@ game binary or game shader payload is redistributed.
 ## Completed checks
 
 - MSVC Debug and Release addon builds.
-- All four CTest suites passed in both configurations: geometry, device
-  identity, 32-cycle addon lifetime and hotfix compatibility.
+- All five CTest suites passed in both configurations: geometry, device
+  identity, 32-cycle addon lifetime, hotfix compatibility and runtime capacity/cache.
 - Optional installed-game checks passed in both configurations: exact file
   hash, PE timestamp/image layout, five hook signatures, two gates, device/hair
   callers, configuration layout and both instance-mask writers.
@@ -57,6 +96,10 @@ as verified by this port.
    pacing, along with a close-up of hair and shadows.
 5. Test gameplay, a cutscene, fast travel and a clean restart. Report crashes,
    visual changes or a persistent zero conversion counter with `ReShade.log`.
+6. Toggle hair Off/On and reload a save repeatedly: `capacity misses` must stay
+   zero, builds must resume, and `active (tracing converted hair)` must persist
+   while hair is visible. Capture list occupancy, recent hook elapsed time and
+   prebuild cache hits/queries along with the same-scene FPS/GPU utilization.
 
 If unstable, close the game and remove the candidate addon. Restore the backed
 up settings or set `PTHairQualityMode=0`. Do not keep forcing device-removal

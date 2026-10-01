@@ -15,6 +15,10 @@ struct Snapshot {
     uint64_t hookMicroseconds{}; // CPU time spent in DOTS hair hooks since launch
     uint64_t vramUsage{},vramBudget{},sharedUsage{}; // this process on the game's adapter
     uint32_t liveOwners{},hairInstances{};
+    uint32_t trackedLists{},listLimit{};
+    uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
+    double recentHookMsPerSecond{};
+    bool recentHookTimeKnown{};
     bool crashReportRequested{},crashReportArmed{},gameHairTraced{},memoryKnown{};
     char reason[256]{};
 };

@@ -130,7 +130,15 @@ void OnOverlay(reshade::api::effect_runtime*) {
     ImGui::Text("Last traced hair instance: %llu ms ago", snapshot.lastHairAgeMs);
 
   ImGui::SeparatorText("Performance / Memory");
-  ImGui::Text("DOTS hook CPU time since launch: %.3f ms",
+  ImGui::Text("Tracked command lists: %u / %u; capacity misses: %llu",
+              snapshot.trackedLists, snapshot.listLimit, snapshot.listCapacityMisses);
+  ImGui::Text("BLAS size cache hits / driver queries: %llu / %llu",
+              snapshot.prebuildCacheHits, snapshot.prebuildDriverQueries);
+  ImGui::Text("Queue completion driver queries: %llu", snapshot.fenceDriverQueries);
+  if (snapshot.recentHookTimeKnown)
+    ImGui::Text("Recent hair-hook elapsed time: %.2f ms per second (includes waits)",
+                snapshot.recentHookMsPerSecond);
+  ImGui::Text("Hair-hook elapsed time since launch: %.3f ms",
               static_cast<double>(snapshot.hookMicroseconds) / 1000.0);
   ImGui::Text("Pool allocations / reuses / releases: %llu / %llu / %llu",
               snapshot.poolAllocations, snapshot.poolReturns,

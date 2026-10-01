@@ -43,6 +43,8 @@ struct RuntimeStats {
     uint64_t poolAllocations{}, poolReleases{}, fullRebuilds{}, reclaims{};
     uint64_t hairBlasBytes{}, hairScratchBytes{}; // the game's AS/scratch buffers of live converted hair
     uint32_t liveOwners{}, hairInstances{}; // live associations; hair instances in the latest admitting copy
+    uint32_t trackedLists{},listLimit{};
+    uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
     bool lost{};
 };
 bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error);
