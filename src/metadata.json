@@ -1,0 +1,23 @@
+{
+  "$schema": "https://cdn.jsdelivr.net/gh/clshortfuse/renodx/renodx-metadata-schema.json",
+  "id": "witcher3-pthairunlock",
+  "title": "The Witcher 3: Path Traced Hair Unlock",
+  "summary": "Experimental RTX 40 DOTS triangle fallback for The Witcher 3 Remastered Path Traced Hair.",
+  "status": "experimental",
+  "notes": [
+    "Only supports the exact DX12 5.0.0.1041720 executable fingerprint.",
+    "The renderer is never told that RTX 40 has native LSS support.",
+    "Unsupported Linear Swept Sphere geometry is converted into a validated triangle fallback.",
+    "Adapted from dashdogy/Michael Robles' MIT-licensed RTX40MFG-Unlock implementation."
+  ],
+  "deploy": {
+    "game_exe": "witcher3.exe",
+    "process_name": "witcher3.exe",
+    "api": "d3d12",
+    "steam_appid": 292030,
+    "architecture": [
+      "x64"
+    ],
+    "platform": "steam"
+  }
+}

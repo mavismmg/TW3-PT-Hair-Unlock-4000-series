@@ -1,0 +1,6 @@
+[submodule "external/reshade"]
+	path = external/reshade
+	url = https://github.com/crosire/reshade.git
+[submodule "external/Detours"]
+	path = external/Detours
+	url = https://github.com/microsoft/Detours.git
