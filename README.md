@@ -10,6 +10,11 @@ project ports his MIT-licensed work to a separate RenoDX/ReShade addon, with
 ReShade device-lifecycle and native-resource ownership fixes. It does not
 claim authorship of the original DOTS implementation.
 
+**Local hotfix candidate:** this branch targets Steam 5.00c, executable
+`5.0.0.1044392`. The public download links below still refer to the previous
+`5.0.0.1041720` build and are not compatible with this game update. The candidate
+is built under `build/Release`; it has not been published or runtime-approved.
+
 ## Download and installation
 
 [Download the experimental package](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/raw/refs/heads/main/downloads/TW3-PT-Hair-Unlock-RTX40-experimental.zip)
@@ -42,10 +47,10 @@ updating or removing it. [Download details and SHA-256](downloads/README.md).
 - NVIDIA **RTX 40 / Ada**; tested locally on an RTX 4070 SUPER.
 - Direct3D 12, DXR 1.1 and Shader Model 6.5.
 - NVIDIA driver **617.14 or newer**, subject to the runtime checks below.
-- Exact verified `witcher3.exe` version **5.0.0.1041720**:
-  - PE timestamp: `0x6AB937C4`.
-  - Image size: `0x06420000`.
-  - SHA-256: `C272B2C2E61F84C758E28FAB69AB2915944DD1E539DBB435FAE9FC67494C7E25`.
+- Exact verified `witcher3.exe` version **5.0.0.1044392 (Steam 5.00c)**:
+  - PE timestamp: `0x6ABD8695`.
+  - Image size: `0x063F8000`.
+  - SHA-256: `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`.
 
 Other executable revisions, unknown shader/runtime hashes, incompatible GPUs,
 and failed resource validation are rejected. A matching version number alone
@@ -60,9 +65,10 @@ libraries. Unsupported LSS-only shader paths remain disabled.
 
 ## Experimental status and performance
 
-Runtime counters have confirmed converted hair builds and admission into ray
-tracing on the tested RTX 4070 SUPER. They are not a substitute for a controlled
-Off/On visual comparison or a complete stability/performance assessment.
+Runtime counters confirmed converted hair builds and admission into ray
+tracing on the previous game build. The 5.00c candidate still requires a new
+runtime test, controlled Off/On visual comparison and stability/performance
+assessment. Passing offline shader validation does not prove gameplay safety.
 
 - Conversion, BLAS updates and tracing add CPU/GPU cost and VRAM usage.
   The reported test with five live hair owners used approximately **938 MiB**
@@ -111,16 +117,26 @@ before building/replacing a loaded addon. Automated tests cover geometry,
 native/proxy device identity and 32 addon unload/reload cycles; they do not
 simulate the actual renderer or prove visual correctness.
 
-Publication checks: the standalone addon and all three automated tests build
-and pass in both MSVC Debug and Release. The distributed, previously tested
-addon also passes the 32-cycle unload/reload regression. Packaging does not
-change the addon source or install a newly built DLL into the game.
+The additional `hotfix_compatibility` test rejects altered PE layouts, hook
+entries, gates, callers and configuration structures. Optional validation of
+the installed executable runs no game entry point and checks all four embedded
+shader identities, translation, DXIL finalization, validation and the converter:
+
+```powershell
+.\build\Release\hotfix_tests.exe 'C:\path\to\bin\x64_dx12\witcher3.exe'
+```
 
 The original RenoDX integration snapshot is
-`98934e0f68d1d3ae2027fc6299fb3e8631cc66b4`. The `src/` addon sources are
-preserved from that snapshot; this repository adds standalone packaging and
-build instructions. No MFG Unlock code or unrelated RenoDX documentation is
-published here.
+`98934e0f68d1d3ae2027fc6299fb3e8631cc66b4`. This branch adapts that port to
+5.00c; geometry conversion and public device ownership handling are unchanged.
+No MFG Unlock code or unrelated RenoDX documentation is published here.
+
+The 5.00c compatibility profile was independently checked against the installed
+executable and dashdogy's user-provided `RTXMFG.dll` **1.4.0.42** (SHA-256
+`0BFC8C2FA07A309026EED461D57566CDAFFB03E28D38E5CA6DB65445CDCA02DE`).
+That DLL is a reference, not a dependency or redistributed binary. Its reported
+GPU-utilization fixes have not been independently verified or claimed by this
+port. Do not load both implementations together: they hook the same renderer.
 
 ## Credits and licenses
 

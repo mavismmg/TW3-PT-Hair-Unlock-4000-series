@@ -40,7 +40,7 @@ bool ValidateMapped(HMODULE image,std::string& error) {
     if(!CopyChecked(&dos,base,sizeof(dos))||dos.e_magic!=IMAGE_DOS_SIGNATURE||dos.e_lfanew<=0||dos.e_lfanew>0x100000
         ||!CopyChecked(&nt,base+dos.e_lfanew,sizeof(nt))||nt.Signature!=IMAGE_NT_SIGNATURE
         ||nt.FileHeader.Machine!=IMAGE_FILE_MACHINE_AMD64||nt.OptionalHeader.Magic!=IMAGE_NT_OPTIONAL_HDR64_MAGIC
-        ||nt.OptionalHeader.SizeOfImage<0x35728c0) {error="live game PE layout mismatch";return false;}
+        ||nt.OptionalHeader.SizeOfImage!=kImageSize||nt.FileHeader.TimeDateStamp!=kPeTimestamp) {error="live game PE layout mismatch";return false;}
     for(const auto& entry:kEntries)if(!Matches(base,entry.rva,entry.before)) {error="game hook entry changed";return false;}
     for(const auto& entry:kGates)if(!Matches(base,entry.rva,entry.before)) {error="game hair gate changed";return false;}
     if(!Matches(base,kHairInstanceWriterRva,kHairInstanceWriter)||!Matches(base,kOrdinaryInstanceWriterRva,kOrdinaryInstanceWriter)) {
@@ -50,9 +50,9 @@ bool ValidateMapped(HMODULE image,std::string& error) {
         std::array<uint8_t,6> call{};int32_t displacement{};
         if(!CopyChecked(call.data(),base+ret-6,call.size())||call[0]!=0xff||call[1]!=0x15) {error="renderer device caller changed";return false;}
         memcpy(&displacement,call.data()+2,4);
-        if(static_cast<int64_t>(ret)+displacement!=0x298dcb0) {error="renderer device import target changed";return false;}
+        if(static_cast<int64_t>(ret)+displacement!=kDeviceImportRva) {error="renderer device import target changed";return false;}
     }
-    for(const auto [ret,target]:std::array<std::pair<uint32_t,uint32_t>,3>{{{0x280f676,0x7cf00},{0x280f9a4,0x7cfd0},{0x1f0b139,0x367890}}}) {
+    for(const auto [ret,target]:std::array<std::pair<uint32_t,uint32_t>,3>{{{kPrebuildReturnRva,kEntries[1].rva},{kBuildReturnRva,kEntries[2].rva},{kCopyReturnRva,kEntries[3].rva}}}) {
         std::array<uint8_t,5> call{};int32_t displacement{};
         if(!CopyChecked(call.data(),base+ret-5,call.size())||call[0]!=0xe8) {error="hair operation caller changed";return false;}
         memcpy(&displacement,call.data()+1,4);

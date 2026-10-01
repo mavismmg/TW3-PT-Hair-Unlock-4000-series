@@ -1,4 +1,5 @@
 #include "gpu_runtime.h"
+#include "game_profile.h"
 #include "checked_memory.h"
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
@@ -627,7 +628,7 @@ bool Buffer(ID3D12Device* device,uint64_t bytes,D3D12_RESOURCE_STATES initial,Co
     return SUCCEEDED(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,initial,nullptr,IID_PPV_ARGS(&resource)));
 }
 // Returns the first unsupported LSS descriptor field, or nullptr. The game's
-// hair builder (witcher3+0x280f2f0) records endcap mode NONE (0); the strip
+// hair builder (witcher3+0x2809680) records endcap mode NONE (0); the strip
 // conversion has no caps, so NONE and CHAINED (1) convert identically.
 const char* InputsInvalid(const HairInput& hair) {
     const auto& g=hair.geometry;
@@ -973,7 +974,7 @@ HRESULT STDMETHODCALLTYPE CreateState(ID3D12Device5* self,const D3D12_STATE_OBJE
         if(!CopyChecked(&libraries[i],objects[i].pDesc,sizeof(libraries[i])))return call(self,original,iid,output);
         const auto replacement=shaders->Replacement(libraries[i].DXILLibrary.pShaderBytecode,libraries[i].DXILLibrary.BytecodeLength);
         if(!replacement.empty()) {
-            (libraries[i].DXILLibrary.BytecodeLength==8240?closest:prepass)=true;
+            (libraries[i].DXILLibrary.BytecodeLength==kClosestSize?closest:prepass)=true;
             libraries[i].DXILLibrary={replacement.data(),replacement.size()};objects[i].pDesc=&libraries[i];++replacements;
         }
     }
@@ -1116,8 +1117,8 @@ bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::
             g.positions.stride,g.radii.stride,g.indices.stride,g.endcaps,g.primitiveFormat);
         error=text;return false;
     }
-    if(!Resource(owner,0x4f8,out.positions,&error)) {error="hair position buffer: "+error;return false;}
-    if(!Resource(owner,0x508,out.indices,&error)) {error="hair index buffer: "+error;return false;}
+    if(!Resource(owner,profile::kPositionOffset,out.positions,&error)) {error="hair position buffer: "+error;return false;}
+    if(!Resource(owner,profile::kIndexOffset,out.indices,&error)) {error="hair index buffer: "+error;return false;}
     const auto& g=out.geometry;
     const auto positions=out.positions->GetDesc(),indices=out.indices->GetDesc();
     if(out.positions->GetGPUVirtualAddress()!=g.positions.address||out.indices->GetGPUVirtualAddress()!=g.indices.address
@@ -1152,8 +1153,8 @@ bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACC
 bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const ExtendedBuild& desc,std::string& error) {
     ComPtr<ID3D12GraphicsCommandList4> native;
     if(!UnwrapList(supplied,native)) {error="native command list unwrapping unavailable";return false;}
-    if(!Resource(hair.owner,0x4e8,hair.blas,&error)) {error="hair BLAS buffer: "+error;return false;}
-    if(!Resource(hair.owner,0x4e0,hair.scratch,&error)) {error="hair scratch buffer: "+error;return false;}
+    if(!Resource(hair.owner,profile::kBlasOffset,hair.blas,&error)) {error="hair BLAS buffer: "+error;return false;}
+    if(!Resource(hair.owner,profile::kScratchOffset,hair.scratch,&error)) {error="hair scratch buffer: "+error;return false;}
     auto& ctx=C();std::lock_guard lock(ctx.lock);
     auto* list=List(native.Get());
     // No compute root signature since Reset (null) leaves nothing to restore;

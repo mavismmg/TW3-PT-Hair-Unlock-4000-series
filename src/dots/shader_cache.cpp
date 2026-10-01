@@ -134,8 +134,8 @@ bool ShaderCache::CompileProgram(std::string_view source,const wchar_t* target,s
 bool ShaderCache::Prepare(HMODULE game,const std::wstring& directory,std::string& error) {
     if(!game) {error="no game image";return false;}
     if(!Initialize(directory,error)||!CompileConverter(converter_,error))return false;
-    constexpr std::array<uint32_t,4> rvas{0x33bbc78,0x3570888,0x326ebd8,0x34237e8};
-    constexpr std::array<uint32_t,4> sizes{8240,8240,63072,63072};
+    constexpr auto rvas=kShaderRvas;
+    constexpr std::array<uint32_t,4> sizes{kClosestSize,kClosestSize,kPrepassSize,kPrepassSize};
     for(size_t i=0;i<rvas.size();++i) {
         const auto* p=reinterpret_cast<const std::byte*>(game)+rvas[i];
         if(!Readable(p,sizes[i])) {error="unreadable game shader";return false;}
@@ -153,10 +153,10 @@ std::span<const std::byte> ShaderCache::Replacement(const void* data,size_t size
     // Some engines copy embedded DXIL before creating the state object. Size is
     // only a cheap filter; exact live content establishes the shader identity.
     try {
-        if(!Ready()||(size!=8240&&size!=63072)||!Readable(data,size))return {};
+        if(!Ready()||(size!=kClosestSize&&size!=kPrepassSize)||!Readable(data,size))return {};
         std::vector<std::byte> copy(size);
-        if(!CopyChecked(copy.data(),data,size)||!HashEquals(copy,size==8240?kClosestHash:kPrepassHash))return {};
-        return size==8240?std::span<const std::byte>(closest_):std::span<const std::byte>(prepass_);
+        if(!CopyChecked(copy.data(),data,size)||!HashEquals(copy,size==kClosestSize?kClosestHash:kPrepassHash))return {};
+        return size==kClosestSize?std::span<const std::byte>(closest_):std::span<const std::byte>(prepass_);
     } catch(...) {}
     return {};
 }

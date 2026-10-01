@@ -16,8 +16,8 @@ Michael Robles, under the MIT License. See `LICENSE.dashdogy-MIT.txt`.
 ## Supported test configuration
 
 - Executable: `bin/x64_dx12/witcher3.exe`
-- Version: `5.0.0.1041720`
-- SHA-256: `C272B2C2E61F84C758E28FAB69AB2915944DD1E539DBB435FAE9FC67494C7E25`
+- Version: `5.0.0.1044392` (Steam 5.00c, local hotfix candidate)
+- SHA-256: `9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51`
 - Renderer: Direct3D 12
 - GPU: NVIDIA Ada / RTX 40
 - NVIDIA driver: 617.14 or newer

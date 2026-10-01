@@ -37,7 +37,9 @@ private:
     std::array<const void*,4> originals_{};
     std::vector<std::byte> closest_,prepass_,converter_;
 };
-inline constexpr char kGameHash[]="C272B2C2E61F84C758E28FAB69AB2915944DD1E539DBB435FAE9FC67494C7E25";
-inline constexpr char kClosestHash[]="4f2063aca18fdac330cdf5d54d52dfd22b620fc50f84184ef3adaefbcc206e3f";
-inline constexpr char kPrepassHash[]="3406beddeabcebcc372e10df365eac5ee03b7aa6e99aa4b1f5d4d252aae7ea6e";
+inline constexpr char kGameHash[]="9406ECCC12B68E08920931442EF6A57340E910D3E01F2082E88232487433FE51";
+inline constexpr char kClosestHash[]="d6bdd62b710a5566db95e4277a7ba94a454ba04f15c65bcbff1c8c81974b4436";
+inline constexpr char kPrepassHash[]="736d1986356e2bf49c38fea948bbc38101a6fc67cd9c96d9c9380fd51de30acf";
+inline constexpr uint32_t kClosestSize=7804, kPrepassSize=62232;
+inline constexpr std::array<uint32_t,4> kShaderRvas{0x33a7468,0x354fa18,0x3261428,0x340ad38};
 }

@@ -90,11 +90,11 @@ std::string Endpoints(bool pre,std::string global) {
   %dots.next = add i32 INDEX, 1
   %dots.p1 = call %dx.types.ResRet.f32 @dx.op.rawBufferLoad.f32(i32 139, %dx.types.Handle %dots.handle, i32 %dots.next, i32 0, i8 15, i32 4)
 )";
-    ReplaceLiteral(code,"GLOBAL",global);ReplaceLiteral(code,"INST",pre?"%r315":"%dots.inst");
-    ReplaceLiteral(code,"INDEX",pre?"%r348":"%r21");ReplaceLiteral(code,"NON",pre?"53":"27");
+    ReplaceLiteral(code,"GLOBAL",global);ReplaceLiteral(code,"INST",pre?"%r291":"%dots.inst");
+    ReplaceLiteral(code,"INDEX",pre?"%r324":"%r21");ReplaceLiteral(code,"NON",pre?"53":"27");
     ReplaceLiteral(code,"ALIAS",pre?"54":"28");
     if(!pre) code="  %dots.inst = call i32 @dx.op.instanceID.i32(i32 141)\n"+code;
-    const std::array<int,8> ids=pre?std::array<int,8>{451,455,459,463,467,471,475,479}:std::array<int,8>{121,125,129,133,137,141,145,149};
+    const std::array<int,8> ids=pre?std::array<int,8>{427,431,435,439,443,447,451,455}:std::array<int,8>{121,125,129,133,137,141,145,149};
     for(size_t i=0;i<ids.size();++i)
         code+="  %r"+std::to_string(ids[i])+" = extractvalue %dx.types.ResRet.f32 %dots.p"+(i<4?"0":"1")+", "+std::to_string(i%4)+"\n";
     return code;
@@ -111,17 +111,34 @@ std::string QueryU(const char* prim,const char* out,const char* tag) {
     return code;
 }
 void Normals(std::string& s,bool pre) {
-    const std::array<int,3> outputs=pre?std::array<int,3>{632,633,634}:std::array<int,3>{283,284,285};
+    const std::array<int,3> outputs=pre?std::array<int,3>{562,563,564}:std::array<int,3>{249,250,251};
     for(int id:outputs) {
         const auto marker="%r"+std::to_string(id);
         auto phi=Match(s,"^  "+marker+" = phi float.*$");
         ReplaceLiteral(phi,marker+" =","%dots.flat.r"+std::to_string(id)+" =");
         s=One(std::move(s),"^  "+marker+" = phi float.*$",phi);
     }
-    const auto marker=pre?"r635":"r286";
+    const auto marker=pre?"r565":"r252";
     const std::string pattern="^  %"+std::string(marker)+" =.*$";
     const std::string original=Match(s,pattern);
-    s=One(std::move(s),pattern,std::string(pre?kPrepassRoundedNormal:kClosestRoundedNormal)+original);
+    // Preserve the rounded-normal math, but bind it to this exact shader's
+    // endpoints, object-space ray origin/direction and normal outputs. The
+    // hotfix removed an extension query and changed the native normal path.
+    std::string rounded(pre?kPrepassRoundedNormal:kClosestRoundedNormal), rebased;
+    const std::array<std::pair<int,int>,17> mapping{{
+        {451,427},{455,431},{459,435},{463,439},{467,443},{471,447},{475,451},{479,455},
+        {501,468},{502,469},{503,470},{504,471},{505,472},{506,473},
+        {632,562},{633,563},{634,564}}};
+    RX registers(R"(r(\d+)\b)");size_t at=0;
+    for(auto it=std::sregex_iterator(rounded.begin(),rounded.end(),registers);it!=std::sregex_iterator();++it) {
+        const auto m=*it;const int id=std::stoi(m[1]);int target=id;
+        if(pre)for(auto [from,to]:mapping)if(id==from)target=to;
+        if(!pre&&id>=283&&id<=285)target=id-34;
+        rebased.append(rounded,at,static_cast<size_t>(m.position())-at);
+        rebased+="r"+std::to_string(target);at=static_cast<size_t>(m.position()+m.length());
+    }
+    rebased.append(rounded,at,std::string::npos);
+    s=One(std::move(s),pattern,rebased+original);
 }
 }
 bool TranslateIr(std::string_view original,ShaderKind kind,std::string& translated,std::string& error) {
@@ -150,12 +167,13 @@ bool TranslateIr(std::string_view original,ShaderKind kind,std::string& translat
 )");
             s=One(std::move(s),R"(^  %r238 = call i32 @dx.op.rayQuery_StateScalar.i32.*$)",
                 "  %dots.palpha = call i32 @dx.op.rayQuery_StateScalar.i32(i32 210, i32 %r211)\n  %r238 = lshr i32 %dots.palpha, 2");
-            s=One(std::move(s),R"(^  %r239 = [\s\S]*?(?=^  %r251 =))",QueryU("dots.palpha","r250","dots.ualpha"));
-            s=One(std::move(s),R"(^  %r302 = [\s\S]*?(?=^  %r314 =))","");
-            s=One(std::move(s),R"(^  %r314 = call i32 @dx.op.rayQuery_StateScalar.i32.*$)",
-                "  %dots.pmain = call i32 @dx.op.rayQuery_StateScalar.i32(i32 210, i32 %r211)\n  %r314 = lshr i32 %dots.pmain, 2\n"
-                    +QueryU("dots.pmain","r313","dots.umain"));
-            s=One(std::move(s),R"(^  %r440 = [\s\S]*?(?=^  %r480 =))",Endpoints(true,global));
+            s=One(std::move(s),R"(^  %r239 = call float @dx.op.rayQuery_StateVector.f32.*$)",QueryU("dots.palpha","r239","dots.ualpha"));
+            // 5.00c already removed the main extended geometry query.
+            s=One(std::move(s),R"(^  %r289 = call float @dx.op.rayQuery_StateVector.f32.*$)",
+                "  %dots.pmain = call i32 @dx.op.rayQuery_StateScalar.i32(i32 210, i32 %r211)\n"+QueryU("dots.pmain","r289","dots.umain"));
+            s=One(std::move(s),R"(^  %r290 = call i32 @dx.op.rayQuery_StateScalar.i32.*$)",
+                "  %r290 = lshr i32 %dots.pmain, 2");
+            s=One(std::move(s),R"(^  %r416 = [\s\S]*?(?=^  %r456 =))",Endpoints(true,global));
         }
         Normals(s,pre);Prune(s);
         if(s.find("call i32 @dx.op.bufferUpdateCounter")!=std::string::npos)

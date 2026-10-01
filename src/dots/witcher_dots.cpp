@@ -154,14 +154,14 @@ bool DeviceMatches(ID3D12Device5* device) {
 int32_t WINAPI Builder(void* owner,const void* context) {
     if(!active.load(std::memory_order_acquire))return originalBuilder(owner,context);
     uint32_t version{};ID3D12GraphicsCommandList4* list{};
-    if(!Readable(owner,0x570)||!Read(context,0,version)||version!=0x201||!Read(context,8,list)||!list)
+    if(!Readable(owner,profile::kOwnerSize)||!Read(context,0,version)||version!=0x201||!Read(context,8,list)||!list)
         return originalBuilder(owner,context);
     OwnerScope scope{owner,list,false};const auto previous=ownerScope;ownerScope=&scope;
     struct RestoreScope {OwnerScope* previous;~RestoreScope(){ownerScope=previous;}} restore{previous};
     return originalBuilder(owner,context);
 }
 int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) try {
-    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),0x280f676))return originalPrebuild(device,supplied);
+    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),profile::kPrebuildReturnRva))return originalPrebuild(device,supplied);
     HookTimer timer;
     if(!HairTracedNow()) {declinedWhileOff.fetch_add(1,std::memory_order_relaxed);return -1;}
     PrebuildParams params{};ExtendedInputs inputs{};HairInput hair;std::string error;
@@ -178,7 +178,7 @@ int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) tr
 } catch(...) {StopConversions();return -1;
 }
 int32_t WINAPI Build(ID3D12GraphicsCommandList4* list,const BuildParams* supplied) try {
-    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),0x280f9a4))return originalBuild(list,supplied);
+    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),profile::kBuildReturnRva))return originalBuild(list,supplied);
     HookTimer timer;
     if(!HairTracedNow()) {declinedWhileOff.fetch_add(1,std::memory_order_relaxed);return -1;}
     BuildParams params{};ExtendedBuild desc{};HairInput hair;std::string error;
@@ -199,7 +199,7 @@ int32_t WINAPI Build(ID3D12GraphicsCommandList4* list,const BuildParams* supplie
 } catch(...) {StopConversions();return -1;
 }
 uintptr_t WINAPI Copy(void* destination,const void* source,size_t bytes) {
-    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),0x1f0b139))return originalCopy(destination,source,bytes);
+    if(!active.load(std::memory_order_acquire)||!At(_ReturnAddress(),profile::kCopyReturnRva))return originalCopy(destination,source,bytes);
     if(!bytes)return originalCopy(destination,source,bytes);
     constexpr size_t stride=sizeof(D3D12_RAYTRACING_INSTANCE_DESC);
     if(bytes%stride||bytes>1024ull*1024*stride||!Readable(source,bytes)) {
@@ -232,8 +232,8 @@ uintptr_t WINAPI Copy(void* destination,const void* source,size_t bytes) {
 bool VerifyProfile(std::string& error) {
     auto& state=S();
     std::ifstream file(std::filesystem::path(state.executable),std::ios::binary|std::ios::ate);
-    if(!file||file.tellg()!=90832336) {error="unsupported game executable size";return false;}
-    std::vector<std::byte> data(90832336);file.seekg(0);
+    if(!file||file.tellg()!=profile::kFileSize) {error="unsupported game executable size";return false;}
+    std::vector<std::byte> data(profile::kFileSize);file.seekg(0);
     if(!file.read(reinterpret_cast<char*>(data.data()),static_cast<std::streamsize>(data.size()))||!HashEquals(data,kGameHash)) {
         error="unsupported game executable SHA-256";return false;
     }
@@ -314,7 +314,7 @@ void BeforeDeviceCreate(const void* caller) noexcept {
         {
             std::lock_guard lock(state.lock);Preferences();
             if(!state.snapshot.applicable||!state.snapshot.requested||!state.snapshot.crashReportRequested||state.dredEnabled
-                ||state.attempted||single_overlay::native::InsideLoader()||(!At(caller,0x1ec4889)&&!At(caller,0x1ec48c2)))return;
+                ||state.attempted||single_overlay::native::InsideLoader()||(!At(caller,profile::kRendererDeviceReturnRvas[0])&&!At(caller,profile::kRendererDeviceReturnRvas[1])))return;
             state.dredEnabled=true;
         }
         // DRED applies only to devices created after it is configured.
@@ -337,7 +337,7 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
       {
         std::lock_guard lock(state.lock);Preferences();
         if(!state.snapshot.applicable||!state.snapshot.requested||state.attempted||single_overlay::native::InsideLoader()
-            ||(!At(caller,0x1ec4889)&&!At(caller,0x1ec48c2)))return;
+            ||(!At(caller,profile::kRendererDeviceReturnRvas[0])&&!At(caller,profile::kRendererDeviceReturnRvas[1])))return;
         state.attempted=true;state.snapshot.stage=Stage::Preparing;
       }
         std::string error;
@@ -367,7 +367,7 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
         }
         using CapsFn=int32_t(WINAPI*)(ID3D12Device*,uint32_t,void*,uint32_t);
         uint32_t lss{};
-        const auto caps=reinterpret_cast<CapsFn>(reinterpret_cast<std::byte*>(state.game)+0x7cd40);
+        const auto caps=reinterpret_cast<CapsFn>(reinterpret_cast<std::byte*>(state.game)+profile::kEntries[4].rva);
         int32_t capsStatus=caps(state.device.Get(),6,&lss,sizeof(lss));
         if(capsStatus==-4) { // NVAPI_API_NOT_INITIALIZED on an early loader route.
             using QueryFn=void*(__cdecl*)(uint32_t);using InitializeFn=int32_t(__cdecl*)();

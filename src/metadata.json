@@ -5,7 +5,7 @@
   "summary": "Experimental RTX 40 DOTS triangle fallback for The Witcher 3 Remastered Path Traced Hair.",
   "status": "experimental",
   "notes": [
-    "Only supports the exact DX12 5.0.0.1041720 executable fingerprint.",
+    "Local hotfix candidate for the exact Steam 5.00c DX12 5.0.0.1044392 executable fingerprint; runtime validation pending.",
     "The renderer is never told that RTX 40 has native LSS support.",
     "Unsupported Linear Swept Sphere geometry is converted into a validated triangle fallback.",
     "Adapted from dashdogy/Michael Robles' MIT-licensed RTX40MFG-Unlock implementation."
