@@ -10,16 +10,18 @@ project ports his MIT-licensed work to a separate RenoDX/ReShade addon, with
 ReShade device-lifecycle and native-resource ownership fixes. It does not
 claim authorship of the original DOTS implementation.
 
-**Release 1.0.0:** targets the exact Steam 5.00c executable `5.0.0.1044392`.
-The local RTX 4070 SUPER tester confirmed the save-load performance fix.
+**Release 1.1.0:** targets the exact Steam 5.00c executable `5.0.0.1044392`.
+Ships the **normal, approved 12-vertex layout**, with CPU validation, resource
+pool and queue/list tracking improvements. The indexed experiment is not
+distributed: local comparison found it significantly slower than the normal build.
 This remains experimental and build-specific; that result is not a guarantee
 of stability or performance on every system.
 
 ## Download and installation
 
-[Download release 1.0.0](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/tag/v1.0.0)
+[Download release 1.1.0](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/tag/v1.1.0)
 (addon, instructions and license notices).
-[Individual addon file](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/download/v1.0.0/renodx-witcher3-pthairunlock.addon64).
+[Individual addon file](https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series/releases/download/v1.1.0/renodx-witcher3-pthairunlock.addon64).
 
 1. Close the game and back up `Documents\The Witcher 3\dx12user.settings`.
 2. Install the **ReShade build with full add-on support** for the game's DX12
@@ -81,9 +83,16 @@ passing offline shader validation alone does not prove gameplay safety.
 - Save-load validation overhead was reduced without retaining raw-owner or
   page-permission caches between frames/saves. Unknown page information uses
   the full checked fallback. This does not establish a Steam-specific engine bug.
+- Release 1.1.0 avoids sizing each conversion buffer for the largest retained
+  hair owner, sweeps completed/stale resources under pressure and allows bounded
+  extra transition headroom only when sampled VRAM budget permits it. Overlay-only
+  tracking failures no longer stop unrelated hair conversions; unsafe hair
+  submissions still fail closed. No universal portal/save-performance fix is claimed.
 - Advanced timings are off by default and session-only. They measure elapsed
   time including waits, with overlapping nested rows, not CPU utilization or
-  GPU time. Disable them for FPS comparisons.
+  GPU time. Optional GPU timestamps separately sample conversion and BLAS work
+  from completed recordings, without waits or flushes; they are not whole-frame
+  GPU timings. Disable both types of profiling for FPS comparisons.
 
 Compare Off/On with identical camera, lighting, resolution and settings. Test
 gameplay, cutscenes, fast travel, resolution changes and a clean restart.
@@ -110,7 +119,7 @@ git clone https://github.com/mavismmg/TW3-PT-Hair-Unlock-4000-series.git
 cd TW3-PT-Hair-Unlock-4000-series
 git submodule update --init external/reshade external/Detours
 git -C external/reshade submodule update --init deps/imgui
-cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+cmake -S . -B build -G "Visual Studio 17 2022" -A x64 -DWITCHER_DOTS_INDEXED_GEOMETRY=OFF
 cmake --build build --config Release
 ctest --test-dir build -C Release --output-on-failure
 ```
@@ -124,6 +133,8 @@ The six test suites also cover scoped input/memory validation, save/resource
 address reuse, fence and lease retention, bounded caches and compact/expanded
 ImGui rendering at 100% and 150% scale. The clean UI is presentation-only; the
 release preserves the approved renderer/converter payloads.
+The indexed source experiment remains compile-time opt-in for research only;
+it is not recommended and is not included in the release package.
 
 The additional `hotfix_compatibility` test rejects altered PE layouts, hook
 entries, gates, callers and configuration structures. Optional validation of
@@ -156,7 +167,7 @@ Do not load both implementations together: they hook the same renderer.
   [RTX40MFG-Unlock](https://github.com/dashdogy/RTX40MFG-Unlock), specifically
   [commit `49dc07b`](https://github.com/dashdogy/RTX40MFG-Unlock/tree/49dc07ba00568c4337d7efc79a4b9e6470289d15/source/native/witcher_dots).
   Copyright (c) 2026 Michael Robles; [MIT license](licenses/dashdogy-MIT.txt).
-  Additional guarded-read performance reference: upstream v1.4.1, `866f491`.
+  Additional guarded-read and queue/list isolation reference: upstream v1.4.1, `866f491`.
 - **mavismmg** - RenoDX/ReShade addon port, boot lifecycle and proxy-device
   ownership fixes, scoped validation/performance improvements, interface and
   local testing.

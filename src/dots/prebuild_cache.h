@@ -4,8 +4,11 @@
 #include <cstdint>
 namespace witcher_dots {
 // Per-native-device cache; caller serializes access. All admitted descriptors
-// have one opaque non-indexed triangle geometry, FLOAT3/stride12, ARRAY layout,
-// no transform and BOTTOM_LEVEL type. Only vertex count and flags can vary.
+// have one opaque triangle geometry, FLOAT3/stride12, ARRAY layout, no transform
+// and BOTTOM_LEVEL type. Layout is fixed for the life of this build/device:
+// non-indexed 12 vertices, or experimental indexed 8 vertices / 12 indices per
+// segment. Index count is an exact function of vertex count in that profile.
+// Only vertex count and flags vary; never switch profile on a live device.
 // Keep exact flags (including PERFORM_UPDATE) distinct; never cache failure.
 class PrebuildCache {
     struct Entry {uint32_t vertices{},flags{};D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};};

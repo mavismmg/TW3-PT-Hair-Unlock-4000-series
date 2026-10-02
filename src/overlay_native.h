@@ -1,5 +1,6 @@
 #pragma once
 #include "overlay_slots.h"
+#include "dots/checked_memory.h"
 #include <wrl/client.h>
 #include <array>
 namespace single_overlay::native {
@@ -8,17 +9,45 @@ inline bool InsideLoader() noexcept {
     static auto fn = reinterpret_cast<Fn>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "RtlIsThreadWithinLoaderCallout"));
     return !fn || fn();
 }
+struct ImageObservation {
+    uintptr_t begin{},end{};
+    HMODULE image{};
+    bool code{};
+    bool Contains(HMODULE owner,uintptr_t address,size_t size,bool executable) const noexcept {
+        return owner&&owner==image&&executable==code&&address>=begin&&address<=end&&size<=end-address;
+    }
+    bool Observe(HMODULE owner,const void* value,size_t size,bool executable) noexcept {
+        const auto address=reinterpret_cast<uintptr_t>(value);
+        if(!owner||!address||!size||size>UINTPTR_MAX-address)return false;
+        if(Contains(owner,address,size,executable))return true;
+        MEMORY_BASIC_INFORMATION memory{};
+        if(witcher_dots::cpu_profile::QueryMemory(value,&memory,sizeof(memory))!=sizeof(memory)
+            ||memory.Type!=MEM_IMAGE||memory.State!=MEM_COMMIT||memory.AllocationBase!=owner
+            ||(memory.Protect&(PAGE_GUARD|PAGE_NOACCESS)))return false;
+        const bool actualCode=(memory.Protect&(PAGE_EXECUTE|PAGE_EXECUTE_READ|PAGE_EXECUTE_READWRITE|PAGE_EXECUTE_WRITECOPY))!=0;
+        const auto base=reinterpret_cast<uintptr_t>(memory.BaseAddress);
+        if(actualCode!=executable||memory.RegionSize>UINTPTR_MAX-base||address<base||size>base+memory.RegionSize-address)return false;
+        begin=base;end=base+memory.RegionSize;image=owner;code=actualCode;return true;
+    }
+};
 inline bool PinInterface(IUnknown* object, size_t last) noexcept {
     if (!object || last > 64) return false;
-    auto** table = *reinterpret_cast<void***>(object);
+    void** table{};
+    if(!witcher_dots::ReadableCurrentPages(object,sizeof(table))||!witcher_dots::CopyGuarded(&table,object,sizeof(table))
+        ||!table||reinterpret_cast<uintptr_t>(table)%alignof(void*))return false;
     HMODULE owner = nullptr;
+    ImageObservation data,code;
     if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
         reinterpret_cast<LPCWSTR>(table), &owner)
-        || !slots::ImageSlot(owner, table) || !slots::ImageSlot(owner, table + last)) return false;
+        || (!data.Observe(owner,table,(last+1)*sizeof(void*),false)
+            &&(!slots::ImageSlot(owner,table)||!slots::ImageSlot(owner,table+last)
+                ||!witcher_dots::ReadableCurrentPages(table,(last+1)*sizeof(void*)))))return false;
+    std::array<void*,65> methods{};
+    if(!witcher_dots::CopyGuarded(methods.data(),table,(last+1)*sizeof(void*)))return false;
     for (size_t i = 0; i <= last; ++i) {
         HMODULE callable = nullptr;
         if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_PIN,
-            reinterpret_cast<LPCWSTR>(table[i]), &callable) || !slots::ImageEntry(callable, table[i])) return false;
+            reinterpret_cast<LPCWSTR>(methods[i]), &callable) || !code.Observe(callable,methods[i],1,true)) return false;
     }
     return true;
 }
@@ -38,10 +67,13 @@ template<class T> bool Unwrap(IUnknown* input, Microsoft::WRL::ComPtr<T>& output
     // original owns an AddRef, as with any successful QueryInterface call.
     constexpr GUID reshadeGuid = {0x7f2c9a11,0x3b4e,0x4d6a,{0x81,0x2f,0x5e,0x9c,0xd3,0x7a,0x1b,0x42}};
     output.Reset();
+    // Prove the first AddRef is callable before taking ownership. Reuse only
+    // this invocation's proof, not a raw pointer or table approval across calls.
+    if(!PinInterface(input,2))return false;
     ComPtr<IUnknown> current = input;
     std::array<ComPtr<IUnknown>, 4> visited;
     for (size_t i = 0; current && i < visited.size(); ++i) {
-        if (!PinInterface(current.Get(), 2) || FAILED(current.As(&visited[i]))) return false;
+        if ((i && !PinInterface(current.Get(), 2)) || FAILED(current.As(&visited[i]))) return false;
         for (size_t j = 0; j < i; ++j) if (visited[j].Get() == visited[i].Get()) return false;
         ComPtr<IUnknown> base;
         HRESULT hr = current->QueryInterface(baseGuid, reinterpret_cast<void**>(base.GetAddressOf()));

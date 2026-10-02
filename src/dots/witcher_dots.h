@@ -17,6 +17,13 @@ struct Snapshot {
     uint64_t vramUsage{},vramBudget{},sharedUsage{}; // this process on the game's adapter
     uint32_t liveOwners{},hairInstances{};
     uint32_t trackedLists{},listLimit{};
+    uint32_t trackedQueues{},queueLimit{};
+    uint64_t queueCapacityMisses{},listTrackingFailures{},sweeps{},poolBudgetFailures{},poolBusyFailures{},poolAllocationFailures{};
+    int32_t lastAllocationResult{};
+    uint64_t indexBytes{},geometryPoolLimit{},asRetentionLimit{},memoryBudgetQueries{};
+    uint64_t gpuTimingSamples{},gpuTimingFailures{},gpuTimingAgeMs{UINT64_MAX};
+    double gpuConverterMs{},gpuBlasMs{};
+    bool indexedGeometry{},gpuTimingsEnabled{};
     uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
     uint64_t inputReuseHits{},inputReuseMisses{};
     uint32_t leasesRecording{},leasesRecorded{},leasesPending{},leasesAvailable{},leasesUnsafe{};

@@ -33,6 +33,17 @@ int main() {
   DeviceIdentity other_proxy(&other,kReshadeUnwrap);
   DeviceIdentity cycle(nullptr,kReshadeUnwrap);
   cycle.underlying=&cycle;
+  // Invocation-local image observations reduce repeated region queries but
+  // never approve a private/unreadable replacement table or arbitrary code.
+  witcher_dots::cpu_profile::SetEnabled(true);
+  const auto queries=witcher_dots::cpu_profile::Read()[static_cast<size_t>(witcher_dots::cpu_profile::Part::MemoryQuery)].calls;
+  assert(single_overlay::native::PinInterface(&native,2));
+  assert(witcher_dots::cpu_profile::Read()[static_cast<size_t>(witcher_dots::cpu_profile::Part::MemoryQuery)].calls-queries<=3);
+  witcher_dots::cpu_profile::SetEnabled(false);
+  struct Fake {void** table;};std::array<void*,3> privateTable{};Fake fake{privateTable.data()};
+  assert(!single_overlay::native::PinInterface(reinterpret_cast<IUnknown*>(&fake),2));
+  fake.table=nullptr;assert(!single_overlay::native::PinInterface(reinterpret_cast<IUnknown*>(&fake),2));
+  assert(!single_overlay::native::PinInterface(nullptr,2)&&!single_overlay::native::PinInterface(&native,65));
   // This is why the old ownership check rejected native resources: the
   // public GetDevice return value has the wrapper's IUnknown identity.
   Microsoft::WRL::ComPtr<IUnknown> returned;

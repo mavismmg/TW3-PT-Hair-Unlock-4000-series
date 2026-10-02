@@ -64,6 +64,13 @@ struct RuntimeStats {
     uint64_t hairBlasBytes{}, hairScratchBytes{}; // the game's AS/scratch buffers of live converted hair
     uint32_t liveOwners{}, hairInstances{}; // live associations; hair instances in the latest admitting copy
     uint32_t trackedLists{},listLimit{};
+    uint32_t trackedQueues{},queueLimit{};
+    uint64_t queueCapacityMisses{},listTrackingFailures{},sweeps{},poolBudgetFailures{},poolBusyFailures{},poolAllocationFailures{};
+    int32_t lastAllocationResult{};
+    char lostReason[192]{};
+    uint64_t indexBytes{},gpuTimingSamples{},gpuTimingFailures{},gpuTimingTick{};
+    double gpuConverterMs{},gpuBlasMs{};
+    uint64_t geometryPoolLimit{kGeometryBudget},asRetentionLimit{1024ull*1024*1024},memoryBudgetQueries{};
     uint64_t listCapacityMisses{},prebuildCacheHits{},prebuildDriverQueries{},fenceDriverQueries{};
     uint64_t inputReuseHits{},inputReuseMisses{};
     uint32_t leasesRecording{},leasesRecorded{},leasesPending{},leasesAvailable{},leasesUnsafe{};
@@ -75,7 +82,7 @@ bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error
 bool AbortGpuPreparation() noexcept;
 void StopConversions() noexcept;
 bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::string& error,const InputReuse* reuse=nullptr);
-bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& info);
+bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& info,std::string& error);
 bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* list,const ExtendedBuild& desc,std::string& error);
 // Modify a private copy of this game's CPU instance data. Suppress unowned
 // hair entries, never mutate an unclassified AS or a non-hair instance. With

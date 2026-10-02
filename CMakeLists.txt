@@ -7,6 +7,10 @@ endif()
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+option(WITCHER_DOTS_INDEXED_GEOMETRY "Experimental eight-vertex DOTS layout (restart/A-B required)" OFF)
+if(WITCHER_DOTS_INDEXED_GEOMETRY)
+  add_compile_definitions(WITCHER_DOTS_INDEXED_GEOMETRY=1)
+endif()
 
 if(NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/reshade/deps/imgui/imgui.h"
    OR NOT EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/external/Detours/src/detours.h")
@@ -33,6 +37,10 @@ set_target_properties(witcher3-pthairunlock PROPERTIES
 
 include(CTest)
 if(BUILD_TESTING)
+  add_executable(gpu_geometry_tests src/dots/gpu_geometry_tests.cpp src/dots/shader_cache.cpp src/dots/shader_ir.cpp src/dots/geometry.cpp)
+  target_compile_definitions(gpu_geometry_tests PRIVATE NOMINMAX)
+  target_compile_options(gpu_geometry_tests PRIVATE /UNDEBUG /utf-8)
+  target_link_libraries(gpu_geometry_tests PRIVATE d3d12 dxgi bcrypt ole32 psapi)
   add_executable(geometry_tests src/dots/geometry_tests.cpp src/dots/geometry.cpp)
   add_executable(identity_tests src/identity_tests.cpp)
   add_executable(lifecycle_tests src/lifecycle_tests.cpp)

@@ -18,6 +18,10 @@ int main() {
     assert(plain.find("Status: active (tracing converted hair)")!=std::string::npos);
     assert(plain.find("Retained associations/admitted instances: 11 / 5")!=std::string::npos);
     assert(plain.find("dashdogy / Michael Robles")!=std::string::npos);
+    assert(plain.find("Tracked queues/limit/capacity misses:")!=std::string::npos);
+    assert(plain.find("Pool failures budget/busy/allocation:")!=std::string::npos);
+    assert(plain.find("Geometry layout: approved 12 vertices")!=std::string::npos);
+    s.indexedGeometry=true;assert(hair_overlay::Diagnostics(s,active,"prepared").find("indexed 8 vertices (experimental)")!=std::string::npos);s.indexedGeometry=false;
     assert(plain.find("VirtualQuery (nested):")==std::string::npos);
     s.cpuProfileEnabled=s.cpuProfileKnown=true;
     s.cpuMsPerSecond[0]=100;s.cpuCallsPerSecond[0]=200;
@@ -35,6 +39,7 @@ int main() {
         window->StateStorage.SetInt(window->GetID("Support / Diagnostics"),mode>=1);
         window->StateStorage.SetInt(window->GetID("About / Compatibility Notes"),mode>=2);
         window->StateStorage.SetInt(window->GetID("CPU timings (advanced)"),mode==3);
+        window->StateStorage.SetInt(window->GetID("GPU timings (advanced)"),mode==3);
         const float start=ImGui::GetCursorPosY();
         hair_overlay::Draw(s,active,"prepared");
         if(mode==0)assert(ImGui::GetCursorPosY()-start<420*scale);

@@ -185,9 +185,8 @@ int32_t WINAPI Prebuild(ID3D12Device5* device,const PrebuildParams* supplied) tr
         RejectReason(error.empty()?"prebuild caller/device/layout not established":error);return -1;
     }
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
-    if(!PrebuildTriangles(hair,inputs.flags,info)||!CopyChecked(params.info,&info,sizeof(info))) {
-        RejectReason("triangle prebuild capacity unavailable");return -1;
-    }
+    if(!PrebuildTriangles(hair,inputs.flags,info,error)) {RejectReason(error);return -1;}
+    if(!CopyChecked(params.info,&info,sizeof(info))) {RejectReason("triangle prebuild output memory write failed");return -1;}
     ownerScope->reuse.input=std::move(hair);ownerScope->reuse.valid=true;
     ownerScope->havePrebuild=true;return 0;
 } catch(...) {StopConversions();return -1;
@@ -429,10 +428,10 @@ void ObserveDevice(IUnknown* object,const void* caller) noexcept {
         // before the first game gate is published. The logical getter is last.
         active.store(true,std::memory_order_release);
         if(!PublishGates(error)) {AbortPreparation();Reason(Stage::Failed,error);return;}
-        wchar_t line[512]{};
-        swprintf_s(line,L"WITCHER_DOTS prepared pid=%lu gameSHA256=%S gpu=%s vendor=%04x device=%04x capability=%d.%d luid=%08x:%08x driver=%u nativeLSS=0 fourTrianglesPerSegment=1 geometryBudgetMiB=512",
+        wchar_t line[768]{};
+        swprintf_s(line,L"WITCHER_DOTS prepared build=1.1.0 pid=%lu gameSHA256=%S gpu=%s vendor=%04x device=%04x capability=%d.%d luid=%08x:%08x driver=%u nativeLSS=0 fourTrianglesPerSegment=1 geometryBaseBudgetMiB=512 geometryMaxBudgetMiB=1024 indexed=%d",
             GetCurrentProcessId(),kGameHash,adapter.Description,adapter.VendorId,adapter.DeviceId,major,minor,
-            static_cast<uint32_t>(state.device->GetAdapterLuid().HighPart),state.device->GetAdapterLuid().LowPart,driver);
+            static_cast<uint32_t>(state.device->GetAdapterLuid().HighPart),state.device->GetAdapterLuid().LowPart,driver,kIndexedGeometry?1:0);
         single_module::Log(line);
         single_module::Log(L"WITCHER_DOTS stage=prepared; waiting for game hair (game Path Traced Hair setting)");
         {std::lock_guard lock(state.lock);state.snapshot.stage=Stage::Active;}
@@ -447,6 +446,15 @@ Snapshot ReadSnapshot() noexcept {
         const auto stats=ReadRuntimeStats();out.prebuilds=stats.prebuilds;out.builds=stats.builds;out.updates=stats.updates;
         out.rejected=stats.rejected;out.shaderLibraries=stats.shaderLibraries;out.instanceCopies=stats.instanceCopies;out.geometryBytes=stats.geometryBytes;
         out.trackedLists=stats.trackedLists;out.listLimit=stats.listLimit;out.listCapacityMisses=stats.listCapacityMisses;
+        out.trackedQueues=stats.trackedQueues;out.queueLimit=stats.queueLimit;out.queueCapacityMisses=stats.queueCapacityMisses;
+        out.listTrackingFailures=stats.listTrackingFailures;out.sweeps=stats.sweeps;
+        out.poolBudgetFailures=stats.poolBudgetFailures;out.poolBusyFailures=stats.poolBusyFailures;out.poolAllocationFailures=stats.poolAllocationFailures;
+        out.lastAllocationResult=stats.lastAllocationResult;
+        out.indexBytes=stats.indexBytes;out.indexedGeometry=kIndexedGeometry;
+        out.geometryPoolLimit=stats.geometryPoolLimit;out.asRetentionLimit=stats.asRetentionLimit;out.memoryBudgetQueries=stats.memoryBudgetQueries;
+        out.gpuTimingsEnabled=gpu_profile::Enabled();out.gpuTimingSamples=stats.gpuTimingSamples;out.gpuTimingFailures=stats.gpuTimingFailures;
+        out.gpuConverterMs=stats.gpuConverterMs;out.gpuBlasMs=stats.gpuBlasMs;
+        if(stats.gpuTimingTick)out.gpuTimingAgeMs=GetTickCount64()-stats.gpuTimingTick;
         out.prebuildCacheHits=stats.prebuildCacheHits;out.prebuildDriverQueries=stats.prebuildDriverQueries;
         out.fenceDriverQueries=stats.fenceDriverQueries;
         out.inputReuseHits=stats.inputReuseHits;out.inputReuseMisses=stats.inputReuseMisses;
@@ -493,7 +501,7 @@ Snapshot ReadSnapshot() noexcept {
             out.memoryKnown=state.local.Budget!=0;
             out.vramUsage=state.local.CurrentUsage;out.vramBudget=state.local.Budget;out.sharedUsage=state.shared.CurrentUsage;
         }
-        if(stats.lost) {out.stage=Stage::Failed;strcpy_s(out.reason,"GPU tracking/fence lost; new conversions stopped");}
+        if(stats.lost) {out.stage=Stage::Failed;strncpy_s(out.reason,stats.lostReason,_TRUNCATE);}
     } catch(...) {out.stage=Stage::Failed;}
     return out;
 }

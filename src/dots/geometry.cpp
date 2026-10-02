@@ -44,6 +44,10 @@ std::array<Vec3,12> Tessellate(StrandVertex p,StrandVertex q) noexcept {
     }
     return out;
 }
+std::array<Vec3,8> TessellateIndexed(StrandVertex p,StrandVertex q) noexcept {
+    const auto original=Tessellate(p,q);
+    return {original[0],original[1],original[2],original[4],original[6],original[7],original[8],original[10]};
+}
 float StrandU(uint32_t triangle,float x,float y) noexcept { return triangle&1?y:x+y; }
 uint64_t SourceVertex(uint32_t triangle,uint32_t segmentsPerStrand) noexcept {
     const uint64_t s=std::max(segmentsPerStrand,1u),p=triangle>>2;

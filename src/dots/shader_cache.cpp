@@ -1,5 +1,7 @@
 #include "shaders.h"
 #include "converter_source.h"
+#include "indexed_converter_source.h"
+#include "geometry.h"
 #include "checked_memory.h"
 #include <bcrypt.h>
 #include <filesystem>
@@ -120,6 +122,7 @@ bool ShaderCache::Translate(std::span<const std::byte> source,ShaderKind kind,st
     return true;
 }
 bool ShaderCache::CompileConverter(std::vector<std::byte>& output,std::string& error) {
+    if constexpr(kIndexedGeometry)return CompileProgram(IndexedConverterSource(),L"cs_6_5",output,error);
     return CompileProgram(kConverterHlsl,L"cs_6_5",output,error);
 }
 bool ShaderCache::CompileProgram(std::string_view source,const wchar_t* target,std::vector<std::byte>& output,std::string& error) {

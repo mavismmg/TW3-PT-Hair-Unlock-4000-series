@@ -6,6 +6,7 @@
 #include "cpu_profile.h"
 #include "checked_memory.h"
 #include "input_scope.h"
+#include "gpu_profile.h"
 #include "../protected_pointer.h"
 #include "../overlay_native.h"
 #include "../single_module.h"
@@ -19,6 +20,7 @@
 #include <unordered_map>
 #include <vector>
 #include <psapi.h>
+#include <dxgi1_4.h>
 #if WITCHER_DOTS_HARNESS
 #define DOTS_TRACE(...) std::printf(__VA_ARGS__)
 #else
@@ -27,7 +29,7 @@
 namespace witcher_dots {
 using Microsoft::WRL::ComPtr;
 namespace {
-constexpr size_t kMaxLists=runtime_policy::kMaxLists,kMaxQueues=8,kMaxLeases=128,kMaxOwners=32,kMaxRoots=1024;
+constexpr size_t kMaxLists=runtime_policy::kMaxLists,kMaxQueues=runtime_policy::kMaxQueues,kMaxLeases=128,kMaxOwners=32,kMaxRoots=1024;
 struct Published { std::atomic<uintptr_t> slot{};std::atomic<void*> original{};void* hook{};DWORD protection{};size_t index{}; };
 // Insert-only open addressing keyed by vtable slot address. Every hooked call
 // resolves its forwarding binding here without a lock, syscall or scan; each
@@ -267,7 +269,11 @@ bool ImageMethod(void* value,HMODULE& owner,bool data=false) {
         &&owner==m.AllocationBase;
 }
 void** Table(void* object) {
-    void** table{};return Read(object,0,table)?table:nullptr;
+    // Query the live page on every invocation, as for owner snapshots. A
+    // fragmented post-load heap must not turn one pointer read into a costly
+    // VAD walk. Unknown/nonresident page metadata retains VirtualQuery.
+    void** table{};
+    return ReadableCurrentPages(object,sizeof(table))&&CopyGuarded(&table,object,sizeof(table))?table:nullptr;
 }
 std::atomic<uint32_t> ambiguousCanonical{};
 // Hot path of every instrumented call: the runtime is invoking a method on a
@@ -401,9 +407,13 @@ struct ListState {
     std::atomic<bool> open{};
     std::atomic<uint32_t> instrumentFailures{};
 };
-struct QueueState { ComPtr<ID3D12CommandQueue> keep;ComPtr<ID3D12Fence> fence;uint64_t next{}; };
+struct QueueState { ComPtr<ID3D12CommandQueue> keep;ComPtr<ID3D12Fence> fence;uint64_t next{},timestampFrequency{}; };
 struct Lease {
     ComPtr<ID3D12Resource> vertices,positions,indices,blas,scratch;
+    std::array<ComPtr<ID3D12Resource>,kMaxOwners> convertedIndexVersions{};
+    ComPtr<ID3D12QueryHeap> timingHeap;
+    ComPtr<ID3D12Resource> timingReadback;
+    uint64_t timingEpoch{},timingSerial{},sampledSerial{},sampledFence{};
     uint64_t capacity{},fenceValue{},lastUsed{};
     ID3D12CommandQueue* queue{};
     ID3D12GraphicsCommandList4* list{};
@@ -422,6 +432,11 @@ struct Context {
     ComPtr<IUnknown> identity;
     ComPtr<ID3D12RootSignature> converterRoot;
     ComPtr<ID3D12PipelineState> converterPso;
+    ComPtr<IDXGIAdapter3> memoryAdapter;
+    DXGI_QUERY_VIDEO_MEMORY_INFO memory{};
+    uint64_t memoryTick{},geometryAtMemorySample{};
+    ComPtr<ID3D12Resource> convertedIndices;
+    uint32_t convertedIndexSegments{};
     std::atomic<ShaderCache*> shaders{};
     std::unordered_map<ID3D12GraphicsCommandList4*,std::unique_ptr<ListState>> lists;
     std::unordered_map<ID3D12CommandQueue*,QueueState> queues;
@@ -445,9 +460,7 @@ template<class T> bool Child(T* child) {
     return child&&SUCCEEDED(child->GetDevice(IID_PPV_ARGS(&device)))&&OwnedDevice(device.Get());
 }
 template<class T> bool Unwrap(IUnknown* input,ComPtr<T>& output) {
-    auto** const table=Table(input);
-    return input&&Readable(input,sizeof(void*))&&Readable(table,3*sizeof(void*))
-        &&single_overlay::native::PinInterface(input,2)&&single_overlay::native::Unwrap(input,output);
+    return single_overlay::native::Unwrap(input,output);
 }
 // Lock-free index of retained lists (never removed). Recording hooks run on
 // the list's own recording thread, which D3D12 requires to be exclusive, so
@@ -497,20 +510,31 @@ bool RememberListTable(ListState& list) {
 }
 bool CurrentListIdentity(const ListState& list) {
     if(!list.table||Table(list.keep.Get())!=list.table)return false;
+    std::array<void*,8> snapshot{};
+    if(!ReadableCurrentPages(list.table,sizeof(snapshot))||!CopyGuarded(snapshot.data(),list.table,sizeof(snapshot)))return false;
     constexpr std::array<size_t,4> indices{0,1,2,7};
     for(size_t i=0;i<indices.size();++i) {
-        void* method{};if(!Read(list.table,indices[i]*sizeof(void*),method)||method!=list.identityMethods[i])return false;
+        if(snapshot[indices[i]]!=list.identityMethods[i])return false;
     }
     return true;
 }
 bool CurrentListTable(const ListState& list) {
-    if(!CurrentListIdentity(list))return false;
+    if(!list.table||Table(list.keep.Get())!=list.table)return false;
     std::lock_guard guard(publicationLock);
+    std::array<void*,kList4Methods> snapshot{};
+    if(!ReadableCurrentPages(list.table,sizeof(snapshot))||!CopyGuarded(snapshot.data(),list.table,sizeof(snapshot)))return false;
+    constexpr std::array<size_t,4> identity{0,1,2,7};
+    for(size_t i=0;i<identity.size();++i)if(snapshot[identity[i]]!=list.identityMethods[i])return false;
+    // One current protection observation for a contiguous table. A table
+    // crossing differently protected regions retains the per-slot fallback.
+    DWORD protection{};
+    const bool uniform=protected_pointer::QueryProtection(reinterpret_cast<uintptr_t>(list.table),protection,sizeof(snapshot));
+    constexpr DWORD mask=0xff|PAGE_GUARD|PAGE_NOCACHE|PAGE_WRITECOMBINE;
     for(const auto index:kTrackedListMethods) {
         const auto slot=reinterpret_cast<uintptr_t>(list.table+index);
         const auto* entry=FindPublication(slot);
-        if(!entry||protected_pointer::ReadPointer(slot)!=entry->hook
-            ||!protected_pointer::ProtectionMatches(slot,entry->protection,sizeof(void*)))return false;
+        if(!entry||snapshot[index]!=entry->hook
+            ||(uniform?(protection&mask)!=(entry->protection&mask):!protected_pointer::ProtectionMatches(slot,entry->protection,sizeof(void*))))return false;
     }
     return true;
 }
@@ -561,7 +585,15 @@ bool UnwrapList(IUnknown* input,ComPtr<ID3D12GraphicsCommandList4>& output) {
     return false;
 }
 void Reject() { ++C().stats.rejected; }
-void Lost() { C().stats.lost=true; }
+void Lost(const char* reason="stopped by hook validation (see fallback detail)") {
+    auto& stats=C().stats;
+    if(!stats.lost) {
+        strncpy_s(stats.lostReason,reason,_TRUNCATE);
+        wchar_t line[320]{};swprintf_s(line,L"WITCHER_DOTS tracking lost: %S; new conversions stopped",stats.lostReason);
+        single_module::Log(line);
+    }
+    stats.lost=true;
+}
 using QueueSamples=FenceSamples<kMaxQueues>;
 uint64_t Completed(const QueueState& queue,QueueSamples* samples=nullptr) {
     const auto query=[&] {++C().stats.fenceDriverQueries;return queue.fence->GetCompletedValue();};
@@ -587,15 +619,20 @@ constexpr uint64_t kRebuildSpacingMs=250;
 // streaming): drop it so its memory is freed and its slot/budget reused.
 // Caller holds C().lock. True while the game still references this
 // association's BLAS (a count above this runtime's own references).
-bool GameHolds(const Association& entry) {
+runtime_policy::ReferenceCounts RuntimeReferences() {
+    runtime_policy::ReferenceCounts counts;
+    for(const auto& entry:C().associations)counts.Add(entry.blas.Get());
+    for(const auto& lease:C().leases)counts.Add(lease.blas.Get());
+    return counts;
+}
+bool GameHolds(const Association& entry,const runtime_policy::ReferenceCounts& counts) {
     if(!entry.blas)return false;
-    ULONG ours=0;
-    for(const auto& other:C().associations)if(other.blas.Get()==entry.blas.Get())++ours;
-    for(const auto& lease:C().leases)if(lease.blas.Get()==entry.blas.Get())++ours;
+    const ULONG ours=counts.Get(entry.blas.Get());
     cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
     entry.blas->AddRef();
     return entry.blas->Release()>ours;
 }
+bool GameHolds(const Association& entry) {return GameHolds(entry,RuntimeReferences());}
 std::atomic<uint32_t> evictionLogs{};
 // Converted-vertex buffers unused this long are returned, so the pool shrinks
 // while hair is off or out of view instead of holding its peak size.
@@ -620,8 +657,9 @@ void ReclaimFinished(uint64_t now,QueueSamples& samples) {
 void DropLeaseReferences(Lease& lease) {
     cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);
     lease.positions.Reset();lease.indices.Reset();lease.blas.Reset();lease.scratch.Reset();
+    for(auto& indices:lease.convertedIndexVersions)indices.Reset();
 }
-void EvictReleased(QueueSamples& samples) {
+void ReleaseCompletedLeases(QueueSamples& samples) {
     auto& ctx=C();const uint64_t now=GetTickCount64();
     ReclaimFinished(now,samples);
     for(auto& lease:ctx.leases) {
@@ -629,12 +667,19 @@ void EvictReleased(QueueSamples& samples) {
         if(lease.blas)DropLeaseReferences(lease);
         if(lease.vertices&&now-lease.lastUsed>=kIdleReleaseMs) {
             lease.vertices.Reset();ctx.stats.geometryBytes-=lease.capacity;lease.capacity=0;++ctx.stats.poolReleases;
+            lease.timingHeap.Reset();lease.timingReadback.Reset();lease.timingEpoch=0;
         }
     }
+}
+void EvictReleased(QueueSamples& samples) {
+    auto& ctx=C();++ctx.stats.sweeps;ctx.lastSweep=GetTickCount64();
+    ReleaseCompletedLeases(samples);
+    auto references=RuntimeReferences();
     uint32_t evicted=0,live=0;
     for(auto& entry:ctx.associations) {
         if(!entry.owner)continue;
-        if(GameHolds(entry)) {++live;continue;}
+        if(GameHolds(entry,references)) {++live;continue;}
+        references.Remove(entry.blas.Get());
         {cpu_profile::Timer profile(cpu_profile::Part::ResourceReferences);entry=Association{};}++evicted;
     }
     if(!evicted)return;
@@ -654,13 +699,15 @@ Association* FindAssociation(void* owner) {
     }
     return free;
 }
-bool Buffer(ID3D12Device* device,uint64_t bytes,D3D12_RESOURCE_STATES initial,ComPtr<ID3D12Resource>& resource) {
+bool Buffer(ID3D12Device* device,uint64_t bytes,D3D12_RESOURCE_STATES initial,ComPtr<ID3D12Resource>& resource,HRESULT* result=nullptr) {
     if(!bytes||bytes>kGeometryBudget)return false;
     D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_DEFAULT;
     D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=bytes;
     desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;
     desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;desc.Flags=D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-    return SUCCEEDED(device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,initial,nullptr,IID_PPV_ARGS(&resource)));
+    const HRESULT hr=device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,initial,nullptr,IID_PPV_ARGS(&resource));
+    if(result)*result=hr;
+    return SUCCEEDED(hr);
 }
 // Returns the first unsupported LSS descriptor field, or nullptr. The game's
 // hair builder (witcher3+0x2809680) records endcap mode NONE (0); the strip
@@ -681,7 +728,110 @@ D3D12_RAYTRACING_GEOMETRY_DESC Triangles(const HairInput& hair,uint64_t address)
     D3D12_RAYTRACING_GEOMETRY_DESC g{};g.Type=D3D12_RAYTRACING_GEOMETRY_TYPE_TRIANGLES;
     g.Flags=D3D12_RAYTRACING_GEOMETRY_FLAG_OPAQUE;g.Triangles.VertexFormat=DXGI_FORMAT_R32G32B32_FLOAT;
     g.Triangles.VertexCount=hair.plan.vertices;g.Triangles.VertexBuffer={address,12};
-    g.Triangles.IndexFormat=DXGI_FORMAT_UNKNOWN;return g;
+    g.Triangles.IndexFormat=kIndexedGeometry?DXGI_FORMAT_R32_UINT:DXGI_FORMAT_UNKNOWN;
+    if constexpr(kIndexedGeometry) {
+        g.Triangles.IndexCount=hair.plan.segments*12;
+        g.Triangles.IndexBuffer=C().convertedIndices?C().convertedIndices->GetGPUVirtualAddress():0;
+    }
+    return g;
+}
+uint64_t ConvertedIndexBytes() {
+    if constexpr(!kIndexedGeometry)return 0;
+    uint64_t bytes=0;std::array<ID3D12Resource*,kMaxLeases*kMaxOwners+1> seen{};size_t count=0;
+    const auto add=[&](ID3D12Resource* resource) {
+        if(!resource||std::find(seen.begin(),seen.begin()+count,resource)!=seen.begin()+count)return;
+        seen[count++]=resource;bytes+=resource->GetDesc().Width;
+    };
+    add(C().convertedIndices.Get());for(const auto& lease:C().leases)for(const auto& version:lease.convertedIndexVersions)add(version.Get());return bytes;
+}
+void SampleAllocationBudget() {
+    auto& ctx=C();const uint64_t now=GetTickCount64();
+    // Demand-driven only. Failed retries cannot cause per-frame polling.
+    if(ctx.memoryTick&&now-ctx.memoryTick<1000)return;
+    ctx.memoryTick=now;ctx.memory={};
+    if(ctx.memoryAdapter&&FAILED(ctx.memoryAdapter->QueryVideoMemoryInfo(0,DXGI_MEMORY_SEGMENT_GROUP_LOCAL,&ctx.memory)))ctx.memory={};
+    ctx.geometryAtMemorySample=ctx.stats.geometryBytes+ConvertedIndexBytes();++ctx.stats.memoryBudgetQueries;
+}
+uint64_t GeometryPoolLimit(uint64_t needed) {
+    const uint64_t used=C().stats.geometryBytes+ConvertedIndexBytes();
+    if(runtime_policy::FitsBudget(used,needed,kGeometryBudget))return kGeometryBudget;
+    SampleAllocationBudget();
+    const uint64_t delta=used>C().geometryAtMemorySample?used-C().geometryAtMemorySample:0;
+    const auto limit=runtime_policy::GeometryLimit(kGeometryBudget,C().memory.Budget,C().memory.CurrentUsage,delta,needed);
+    C().stats.geometryPoolLimit=limit;return limit;
+}
+bool RetainConvertedIndices(Lease& lease) {
+    if constexpr(!kIndexedGeometry)return true;
+    auto* resource=C().convertedIndices.Get();if(!resource)return false;
+    for(const auto& version:lease.convertedIndexVersions)if(version.Get()==resource)return true;
+    for(auto& version:lease.convertedIndexVersions)if(!version) {version=resource;return true;}
+    return false;
+}
+bool EnsureConvertedIndices(uint32_t segments,std::string& error) {
+    if constexpr(!kIndexedGeometry)return true;
+    auto& ctx=C();if(ctx.convertedIndices&&ctx.convertedIndexSegments>=segments)return true;
+    const uint64_t bytes=uint64_t(segments)*12*sizeof(uint32_t);
+    // Immutable shared prefixes. Growing creates a new resource; recordings
+    // and submitted leases retain every old resource they still reference.
+    if(!runtime_policy::FitsBudget(ctx.stats.geometryBytes+ConvertedIndexBytes(),bytes,GeometryPoolLimit(bytes))) {
+        error="indexed geometry budget exhausted growing immutable indices";return false;
+    }
+    D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_UPLOAD;
+    D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=bytes;
+    desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+    ComPtr<ID3D12Resource> resource;
+    HRESULT hr=ctx.device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_GENERIC_READ,nullptr,IID_PPV_ARGS(&resource));
+    if(FAILED(hr)) {ctx.stats.lastAllocationResult=hr;++ctx.stats.poolAllocationFailures;error="immutable index buffer allocation failed";return false;}
+    uint32_t* indices{};const D3D12_RANGE read{0,0};
+    if(FAILED(resource->Map(0,&read,reinterpret_cast<void**>(&indices)))||!indices) {error="immutable index buffer Map failed";return false;}
+    for(uint32_t segment=0;segment<segments;++segment)for(uint32_t corner=0;corner<12;++corner)indices[size_t(segment)*12+corner]=SegmentIndex(segment,corner);
+    const D3D12_RANGE written{0,static_cast<SIZE_T>(bytes)};resource->Unmap(0,&written);
+    resource->SetName(L"WitcherDOTS immutable shared triangle indices");
+    ctx.convertedIndices=std::move(resource);ctx.convertedIndexSegments=segments;return true;
+}
+bool PrepareTiming(Lease& lease) {
+    const uint64_t epoch=gpu_profile::epoch.load(std::memory_order_acquire);
+    if(!(epoch&1)) {lease.timingEpoch=0;return false;}
+    if(!lease.timingHeap||!lease.timingReadback) {
+        D3D12_QUERY_HEAP_DESC query{};query.Type=D3D12_QUERY_HEAP_TYPE_TIMESTAMP;query.Count=4;
+        D3D12_HEAP_PROPERTIES heap{};heap.Type=D3D12_HEAP_TYPE_READBACK;
+        D3D12_RESOURCE_DESC desc{};desc.Dimension=D3D12_RESOURCE_DIMENSION_BUFFER;desc.Width=4*sizeof(uint64_t);
+        desc.Height=1;desc.DepthOrArraySize=1;desc.MipLevels=1;desc.SampleDesc.Count=1;desc.Layout=D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        ComPtr<ID3D12QueryHeap> timing;ComPtr<ID3D12Resource> readback;
+        if(FAILED(C().device->CreateQueryHeap(&query,IID_PPV_ARGS(&timing)))
+            ||FAILED(C().device->CreateCommittedResource(&heap,D3D12_HEAP_FLAG_NONE,&desc,D3D12_RESOURCE_STATE_COPY_DEST,nullptr,IID_PPV_ARGS(&readback)))) {
+            ++C().stats.gpuTimingFailures;lease.timingEpoch=0;return false;
+        }
+        lease.timingHeap=std::move(timing);lease.timingReadback=std::move(readback);
+    }
+    lease.timingEpoch=epoch;++lease.timingSerial;return true;
+}
+void CollectGpuTimings(uint64_t now,QueueSamples& samples) {
+    const auto epoch=gpu_profile::epoch.load(std::memory_order_acquire);
+    if(!(epoch&1))return;
+    auto& ctx=C();
+    static uint64_t observedEpoch{};
+    if(observedEpoch!=epoch) {observedEpoch=epoch;ctx.stats.gpuTimingSamples=ctx.stats.gpuTimingTick=0;ctx.stats.gpuConverterMs=ctx.stats.gpuBlasMs=0;}
+    double converter=0,blas=0;uint64_t count=0;
+    for(auto& lease:ctx.leases) {
+        if(!lease.timingReadback||lease.timingEpoch!=epoch||!lease.queue||lease.poisoned
+            ||(lease.sampledSerial==lease.timingSerial&&lease.sampledFence==lease.fenceValue))continue;
+        auto* list=lease.list?List(lease.list):nullptr;
+        if(list&&(list->open.load(std::memory_order_acquire)||list->generation!=lease.generation))continue;
+        const auto q=ctx.queues.find(lease.queue);
+        if(q==ctx.queues.end()||!q->second.timestampFrequency||!lease.fenceValue)continue;
+        const auto complete=Completed(q->second,&samples);
+        if(complete==UINT64_MAX||complete<lease.fenceValue)continue;
+        void* data{};const D3D12_RANGE range{0,4*sizeof(uint64_t)};
+        if(FAILED(lease.timingReadback->Map(0,&range,&data))||!data) {++ctx.stats.gpuTimingFailures;continue;}
+        std::array<uint64_t,4> ticks{};memcpy(ticks.data(),data,sizeof(ticks));
+        const D3D12_RANGE written{0,0};lease.timingReadback->Unmap(0,&written);
+        lease.sampledSerial=lease.timingSerial;lease.sampledFence=lease.fenceValue;
+        if(!gpu_profile::Valid(ticks.data(),q->second.timestampFrequency)) {++ctx.stats.gpuTimingFailures;continue;}
+        converter+=double(ticks[1]-ticks[0])*1000/q->second.timestampFrequency;
+        blas+=double(ticks[3]-ticks[2])*1000/q->second.timestampFrequency;++count;
+    }
+    if(count) {ctx.stats.gpuConverterMs=converter/count;ctx.stats.gpuBlasMs=blas/count;ctx.stats.gpuTimingSamples+=count;ctx.stats.gpuTimingTick=now;}
 }
 D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS Inputs(uint32_t flags,const D3D12_RAYTRACING_GEOMETRY_DESC* geometry) {
     D3D12_BUILD_RAYTRACING_ACCELERATION_STRUCTURE_INPUTS input{};input.Type=D3D12_RAYTRACING_ACCELERATION_STRUCTURE_TYPE_BOTTOM_LEVEL;
@@ -903,17 +1053,17 @@ void STDMETHODCALLTYPE Execute(ID3D12CommandQueue* self,UINT count,ID3D12Command
         if(queue!=ctx.queues.end()) {value=++queue->second.next;fence=queue->second.fence.Get();}
         for(UINT i=0;i<count;++i) {
             auto* s=List(lists[i]);if(!s||!s->hasLeases.load(std::memory_order_acquire))continue;
-            if(s->open.load(std::memory_order_acquire))Lost();
+            if(s->open.load(std::memory_order_acquire))Lost("hair recording submitted while list still open");
             if(s->reclaimed.load(std::memory_order_acquire)) {
                 // Its converted vertices may already serve another recording.
                 static std::atomic_flag logged=ATOMIC_FLAG_INIT;
                 if(!logged.test_and_set())single_module::Log(L"WITCHER_DOTS finished hair recording submitted again after its buffer was returned; conversions stopped");
-                Lost();continue;
+                Lost("finished hair recording replayed after buffer returned");continue;
             }
             for(size_t id:s->leases) {
                 auto& lease=ctx.leases[id];
                 if(lease.list!=s->keep.Get()||lease.generation!=s->generation)continue;
-                if(!fence||(lease.queue&&lease.queue!=self)) {lease.poisoned=true;Lost();}
+                if(!fence||(lease.queue&&lease.queue!=self)) {lease.poisoned=true;Lost(fence?"hair recording submitted on a second queue":"hair recording submitted on an untracked queue");}
                 else {lease.queue=self;lease.fenceValue=value;}
             }
         }
@@ -922,16 +1072,26 @@ void STDMETHODCALLTYPE Execute(ID3D12CommandQueue* self,UINT count,ID3D12Command
     if(fence&&FAILED(self->Signal(fence,value))) {
         std::lock_guard lock(ctx.lock);
         for(auto& lease:ctx.leases)if(lease.queue==self&&lease.fenceValue==value)lease.poisoned=true;
-        Lost();
+        Lost("hair queue fence Signal failed");
     }
 }
+std::atomic<bool> queueCapacityLogged{};
 bool TrackQueue(ID3D12CommandQueue* queue) noexcept try {
     if(!Child(queue))return false;
     const auto type=queue->GetDesc().Type;
     if(type!=D3D12_COMMAND_LIST_TYPE_DIRECT&&type!=D3D12_COMMAND_LIST_TYPE_COMPUTE)return true;
     auto& ctx=C();std::lock_guard lock(ctx.lock);
-    if(ctx.queues.contains(queue))return true;if(ctx.queues.size()>=kMaxQueues)return false;
+    if(ctx.queues.contains(queue))return true;
+    // Adapted from dashdogy/Michael Robles' MIT v1.4.1 robustness fix.
+    // Overlay-only submissions remain harmless; Execute must still intercept
+    // hair submitted without a tracked fence and fail closed in that case.
+    if(ctx.queues.size()>=kMaxQueues) {
+        ++ctx.stats.queueCapacityMisses;
+        if(!queueCapacityLogged.exchange(true))single_module::Log(L"WITCHER_DOTS queue capacity reached (32); extra queues remain untracked");
+        return Publish(queue,10,reinterpret_cast<void*>(&Execute),Kind::Queue);
+    }
     QueueState state;state.keep=queue;
+    queue->GetTimestampFrequency(&state.timestampFrequency); // invariant, once per admitted queue
     if(FAILED(ctx.device->CreateFence(0,D3D12_FENCE_FLAG_NONE,IID_PPV_ARGS(&state.fence)))||!Publish(queue,10,reinterpret_cast<void*>(&Execute),Kind::Queue))return false;
     ctx.queues.emplace(queue,std::move(state));return true;
 } catch(...) {return false;}
@@ -941,7 +1101,7 @@ HRESULT STDMETHODCALLTYPE CreateQueue(ID3D12Device* self,const D3D12_COMMAND_QUE
     if(SUCCEEDED(hr)&&output&&*output&&OwnedDevice(self)) {
         ComPtr<ID3D12CommandQueue> queue;
         if(SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&queue)))&&!TrackQueue(queue.Get())) {
-            std::lock_guard lock(C().lock);Lost();
+            std::lock_guard lock(C().lock);Lost("queue tracking failed: device, fence or publication");
         }
     }
     return hr;
@@ -952,7 +1112,8 @@ HRESULT STDMETHODCALLTYPE CreateList(ID3D12Device* self,UINT node,D3D12_COMMAND_
     if(SUCCEEDED(hr)&&output&&*output&&OwnedDevice(self)) {
         ComPtr<ID3D12GraphicsCommandList4> list;
         if(SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&list)))&&!TrackList(list.Get(),true,pso)) {
-            std::lock_guard lock(C().lock);Lost();
+            std::lock_guard lock(C().lock);++C().stats.listTrackingFailures;
+            if(C().stats.listTrackingFailures<=8)single_module::Log(L"WITCHER_DOTS list tracking failed; only hair on that list is refused");
         }
     }
     return hr;
@@ -963,7 +1124,8 @@ HRESULT STDMETHODCALLTYPE CreateList1(ID3D12Device4* self,UINT node,D3D12_COMMAN
     if(SUCCEEDED(hr)&&output&&*output&&OwnedDevice(self)) {
         ComPtr<ID3D12GraphicsCommandList4> list;
         if(SUCCEEDED(static_cast<IUnknown*>(*output)->QueryInterface(IID_PPV_ARGS(&list)))&&!TrackList(list.Get(),false,nullptr)) {
-            std::lock_guard lock(C().lock);Lost();
+            std::lock_guard lock(C().lock);++C().stats.listTrackingFailures;
+            if(C().stats.listTrackingFailures<=8)single_module::Log(L"WITCHER_DOTS list tracking failed; only hair on that list is refused");
         }
     }
     return hr;
@@ -1124,6 +1286,11 @@ bool InitializeGpu(ID3D12Device5* device,ShaderCache* shaders,std::string& error
     auto& ctx=C();if(!device||!shaders||!shaders->Ready()){error="GPU shader cache not ready";return false;}
     ctx.device=device;ctx.shaders=shaders;
     if(FAILED(device->QueryInterface(IID_PPV_ARGS(&ctx.identity)))) {error="device identity unavailable";return false;}
+    // Optional budget source; failure keeps conservative allocation limits.
+    using FactoryFn=HRESULT(WINAPI*)(REFIID,void**);
+    const auto factoryFn=reinterpret_cast<FactoryFn>(GetProcAddress(single_module::LoadSystemModule(L"dxgi.dll"),"CreateDXGIFactory1"));
+    ComPtr<IDXGIFactory4> factory;
+    if(factoryFn&&SUCCEEDED(factoryFn(IID_PPV_ARGS(&factory))))factory->EnumAdapterByLuid(device->GetAdapterLuid(),IID_PPV_ARGS(&ctx.memoryAdapter));
     D3D12_ROOT_PARAMETER parameters[4]{};
     parameters[0].ParameterType=D3D12_ROOT_PARAMETER_TYPE_32BIT_CONSTANTS;parameters[0].Constants={0,0,5};
     parameters[1].ParameterType=D3D12_ROOT_PARAMETER_TYPE_SRV;parameters[1].Descriptor={0,0};
@@ -1243,9 +1410,10 @@ bool ReadHairInput(void* owner,const ExtendedInputs& inputs,HairInput& out,std::
     out.segmentsPerStrand=g.primitiveCount/strands;
     return out.segmentsPerStrand>0;
 }
-bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& info) {
+bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO& info,std::string& error) {
     std::lock_guard lock(C().lock);
-    if(C().stats.lost||!hair.plan||!C().device||(flags!=7&&flags!=0x27)) {Reject();return false;}
+    if(C().stats.lost) {error=std::string("prebuild stopped: ")+C().stats.lostReason;Reject();return false;}
+    if(!hair.plan||!C().device||(flags!=7&&flags!=0x27)) {error="invalid triangle prebuild plan/device/flags";Reject();return false;}
     const auto geometry=Triangles(hair,0);const auto inputs=Inputs(flags,&geometry);
     bool hit{};
     auto& ctx=C();
@@ -1253,10 +1421,13 @@ bool PrebuildTriangles(const HairInput& hair,uint32_t flags,D3D12_RAYTRACING_ACC
         ++ctx.stats.prebuildDriverQueries;ctx.device->GetRaytracingAccelerationStructurePrebuildInfo(&inputs,&result);
     });
     if(hit)++ctx.stats.prebuildCacheHits;
-    if(!sized) {Reject();return false;}
+    if(!sized) {error="driver returned no usable triangle prebuild sizes";Reject();return false;}
     if(!info.ResultDataMaxSizeInBytes||!info.ScratchDataSizeInBytes
         ||info.ResultDataMaxSizeInBytes>256ull*1024*1024||info.ScratchDataSizeInBytes>kGeometryBudget
-        ||info.UpdateScratchDataSizeInBytes>kGeometryBudget) {Reject();return false;}
+        ||info.UpdateScratchDataSizeInBytes>kGeometryBudget) {
+        char text[192]{};_snprintf_s(text,_TRUNCATE,"triangle prebuild size limit: BLAS=%llu scratch=%llu update=%llu bytes",info.ResultDataMaxSizeInBytes,info.ScratchDataSizeInBytes,info.UpdateScratchDataSizeInBytes);
+        error=text;Reject();return false;
+    }
     ++C().stats.prebuilds;return true;
 }
 bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const ExtendedBuild& desc,std::string& error) {
@@ -1310,21 +1481,33 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         ||!(blasDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)
         ||!(scratchDesc.Flags&D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS)) {error="AS allocation/address mismatch";Reject();return false;}
     QueueSamples samples;
-    EvictReleased(samples);
+    if(runtime_policy::SweepDue(GetTickCount64(),ctx.lastSweep))EvictReleased(samples);
+    else ReleaseCompletedLeases(samples);
     Association* association=FindAssociation(hair.owner);
     const bool update=(desc.inputs.flags&0x20)!=0;
     if(update&&(!association||!association->owner||!UpdateMatches(*association,hair,desc))) {error="unknown BLAS update generation/topology";Reject();return false;}
     if(!update&&desc.source) {error="unexpected BLAS source";Reject();return false;}
+    if(!association) {EvictReleased(samples);association=FindAssociation(hair.owner);}
     if(!association) {error="hair owner capacity exhausted";Reject();return false;}
     // The game allocated these AS buffers from our prebuild sizes; this bound
     // only caps how much live hair is converted (stale owners are evicted).
-    uint64_t totalAs=blasDesc.Width;uint32_t owners=1;
-    for(const auto& entry:ctx.associations)if(&entry!=association&&entry.owner) {totalAs+=entry.bytes;++owners;}
-    if(totalAs>kAsBudget) {
+    const auto totalAsBytes=[&] {
+        uint64_t total=blasDesc.Width;std::array<ID3D12Resource*,kMaxOwners+1> seen{};size_t count=1;seen[0]=hair.blas.Get();
+        for(const auto& entry:ctx.associations)if(&entry!=association&&entry.owner
+            &&std::find(seen.begin(),seen.begin()+count,entry.blas.Get())==seen.begin()+count) {
+            seen[count++]=entry.blas.Get();total+=entry.bytes;
+        }
+        return total;
+    };
+    uint64_t totalAs=totalAsBytes();
+    if(totalAs>kAsBudget) {EvictReleased(samples);totalAs=totalAsBytes();SampleAllocationBudget();}
+    ctx.stats.asRetentionLimit=runtime_policy::AsLimit(ctx.memory.Budget);
+    if(totalAs>ctx.stats.asRetentionLimit) {
         char text[160]{};
-        _snprintf_s(text,_TRUNCATE,"hair AS budget exhausted (%u live owners, %llu MiB)",owners,totalAs>>20);
+        _snprintf_s(text,_TRUNCATE,"hair AS retention limit exhausted (%llu MiB retained, %llu MiB limit)",totalAs>>20,ctx.stats.asRetentionLimit>>20);
         error=text;Reject();return false;
     }
+    if(!EnsureConvertedIndices(hair.plan.segments,error)) {Reject();return false;}
     const auto emptyGeometry=Triangles(hair,0);const auto sizeInput=Inputs(desc.inputs.flags,&emptyGeometry);
     D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO size{};
     bool sizeHit{};
@@ -1346,11 +1529,9 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         const auto& own=ctx.leases[id];
         if(own.list==native.Get()&&own.generation==list->generation&&!own.poisoned&&own.capacity>=hair.plan.bytes) {chosen=id;reused=true;break;}
     }
-    // The first buffer of a recording is sized for the largest live hair, so a
-    // burst (load, settings change) reuses one buffer rather than one per hair.
-    uint64_t preferred=hair.plan.bytes;
-    if(chosen==kMaxLeases)for(const auto& entry:ctx.associations)
-        if(entry.owner)preferred=std::max<uint64_t>(preferred,uint64_t(entry.segments)*kBytesPerSegment);
+    // Allocate for the current conversion, not the largest owner retained
+    // from a previous save. Reuse larger existing buffers only by best fit.
+    const uint64_t preferred=hair.plan.bytes;
     // Best fit keeps large idle buffers for large hair, avoiding reallocation.
     const auto bestFit=[&](uint64_t bytes) {
         size_t best=kMaxLeases;
@@ -1362,15 +1543,20 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         return best;
     };
     if(chosen==kMaxLeases)chosen=bestFit(preferred);
-    if(chosen==kMaxLeases&&preferred>hair.plan.bytes)chosen=bestFit(hair.plan.bytes);
+    if(chosen==kMaxLeases&&!runtime_policy::FitsBudget(ctx.stats.geometryBytes+ConvertedIndexBytes(),preferred,kGeometryBudget)) {
+        EvictReleased(samples);chosen=bestFit(preferred);
+    }
     const auto allocate=[&](Lease& candidate,uint64_t bytes) {
-        if(bytes>kGeometryBudget-ctx.stats.geometryBytes
-            ||!Buffer(ctx.device.Get(),bytes,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,candidate.vertices))return false;
+        if(!runtime_policy::FitsBudget(ctx.stats.geometryBytes+ConvertedIndexBytes(),bytes,GeometryPoolLimit(bytes)))return false;
+        HRESULT hr{};
+        if(!Buffer(ctx.device.Get(),bytes,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,candidate.vertices,&hr)) {
+            ++ctx.stats.poolAllocationFailures;ctx.stats.lastAllocationResult=hr;return false;
+        }
         candidate.vertices->SetName(L"WitcherDOTS converted hair vertices");
         candidate.capacity=bytes;ctx.stats.geometryBytes+=bytes;++ctx.stats.poolAllocations;return true;
     };
     if(chosen==kMaxLeases)for(size_t i=0;i<ctx.leases.size();++i)if(Available(ctx.leases[i],&samples)&&!ctx.leases[i].vertices) {
-        if(allocate(ctx.leases[i],preferred)||(preferred>hair.plan.bytes&&allocate(ctx.leases[i],hair.plan.bytes)))chosen=i;
+        if(allocate(ctx.leases[i],preferred))chosen=i;
         break;
     }
     // Budget full of buffers sized for earlier hair: retire idle, undersized
@@ -1382,12 +1568,20 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
         if(allocate(idle,hair.plan.bytes))chosen=i;
     }
     if(chosen==kMaxLeases) {
-        char text[160]{};
-        _snprintf_s(text,_TRUNCATE,"geometry pool unavailable (%llu MiB needed, %llu MiB pooled)",hair.plan.bytes>>20,ctx.stats.geometryBytes>>20);
+        uint32_t busy=0;for(const auto& item:ctx.leases)if(!Available(item,&samples))++busy;
+        const auto limit=GeometryPoolLimit(hair.plan.bytes);
+        const bool budget=!runtime_policy::FitsBudget(ctx.stats.geometryBytes+ConvertedIndexBytes(),hair.plan.bytes,limit);
+        if(budget)++ctx.stats.poolBudgetFailures;else if(busy==kMaxLeases)++ctx.stats.poolBusyFailures;
+        char text[240]{};
+        _snprintf_s(text,_TRUNCATE,"geometry pool unavailable: %s; needed=%llu pooled=%llu limit=%llu MiB; busy=%u; allocation HRESULT=0x%08X",
+            budget?"budget":busy==kMaxLeases?"all leases busy":"allocation failed",hair.plan.bytes>>20,ctx.stats.geometryBytes>>20,limit>>20,busy,static_cast<unsigned>(ctx.stats.lastAllocationResult));
         error=text;Reject();return false;
     }
     const uint64_t now=GetTickCount64();
     auto& lease=ctx.leases[chosen];lease.lastUsed=now;
+    // Reusing vertices in one recording does not permit releasing an older
+    // index prefix referenced by a previously recorded BLAS in that recording.
+    if(!RetainConvertedIndices(lease)) {error="recording index generation capacity exhausted";Reject();return false;}
     // A newly chosen buffer's previous submission is complete: its fence (and
     // queue) belong to that submission, not to this recording's.
     if(!reused) {lease.queue=nullptr;lease.fenceValue=0;}
@@ -1400,6 +1594,10 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     injecting=true;
     struct Injection {~Injection(){injecting=false;}} injection;
     cpu_profile::Timer recording(cpu_profile::Part::Recording);
+    // Last conversion of each recording, not whole-frame GPU cost. Never wait
+    // or flush for diagnostics; collect only after its submission completes.
+    const bool timing=PrepareTiming(lease);
+    if(timing)native->EndQuery(lease.timingHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0);
     // With the opt-in removal report, name this runtime's commands in DRED.
     const bool marked=removalReportArmed.load(std::memory_order_acquire);
     if(marked) {static constexpr wchar_t text[]=L"WitcherDOTS hair conversion";native->SetMarker(0,text,sizeof(text));}
@@ -1418,11 +1616,13 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     Original<VaFn>(native.Get(),39)(native.Get(),2,hair.geometry.indices.address);
     Original<VaFn>(native.Get(),41)(native.Get(),3,lease.vertices->GetGPUVirtualAddress());
     native->Dispatch(hair.plan.groups,1,1);
-    D3D12_RESOURCE_BARRIER barriers[2]{};
-    barriers[0].Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;barriers[0].UAV.pResource=lease.vertices.Get();
-    barriers[1].Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    barriers[1].Transition={lease.vertices.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
-    Original<BarrierFn>(native.Get(),26)(native.Get(),2,barriers);
+    // The UAV -> read transition provides the write/read dependency itself;
+    // a separate immediately adjacent vertex UAV barrier is redundant.
+    // AS/scratch barriers and recording-reuse transitions remain unchanged.
+    D3D12_RESOURCE_BARRIER barrier{};barrier.Type=D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    barrier.Transition={lease.vertices.Get(),D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES,D3D12_RESOURCE_STATE_UNORDERED_ACCESS,D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE};
+    Original<BarrierFn>(native.Get(),26)(native.Get(),1,&barrier);
+    if(timing)native->EndQuery(lease.timingHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,1);
     Restore(native.Get(),*list->bindings,bound);
     const auto geometry=Triangles(hair,lease.vertices->GetGPUVirtualAddress());
     // Refits keep the first build's tree; strands that travel far (riding,
@@ -1436,10 +1636,15 @@ bool BuildTriangles(HairInput hair,ID3D12GraphicsCommandList4* supplied,const Ex
     D3D12_RESOURCE_BARRIER asBarriers[2]{};
     asBarriers[0].Type=asBarriers[1].Type=D3D12_RESOURCE_BARRIER_TYPE_UAV;
     asBarriers[0].UAV.pResource=hair.blas.Get();asBarriers[1].UAV.pResource=hair.scratch.Get();
+    if(timing)native->EndQuery(lease.timingHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,2);
     Original<BarrierFn>(native.Get(),26)(native.Get(),2,asBarriers);
     if(marked) {static constexpr wchar_t text[]=L"WitcherDOTS triangle BLAS build";native->SetMarker(0,text,sizeof(text));}
     native->BuildRaytracingAccelerationStructure(&build,0,nullptr);
     Original<BarrierFn>(native.Get(),26)(native.Get(),1,asBarriers);
+    if(timing) {
+        native->EndQuery(lease.timingHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,3);
+        native->ResolveQueryData(lease.timingHeap.Get(),D3D12_QUERY_TYPE_TIMESTAMP,0,4,lease.timingReadback.Get(),0);
+    }
     recording.Stop();
     association->owner=hair.owner;association->blas=hair.blas;association->positions=hair.positions;association->indices=hair.indices;
     association->address=desc.destination;association->bytes=blasDesc.Width;association->scratchBytes=scratchDesc.Width;
@@ -1464,7 +1669,8 @@ bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool h
     // still runs, so destroyed hair is released here as well.
     const uint64_t now=GetTickCount64();
     QueueSamples samples;
-    if(now-ctx.lastSweep>=250) {ctx.lastSweep=now;EvictReleased(samples);}
+    if(runtime_policy::SweepDue(now,ctx.lastSweep))EvictReleased(samples);
+    auto references=RuntimeReferences();
     uint32_t admitted=0;
     if(!hairTraced) {
         // HairWorks stays raster: no hair instance enters any ray traced pass.
@@ -1477,7 +1683,7 @@ bool PrepareInstances(std::span<D3D12_RAYTRACING_INSTANCE_DESC> instances,bool h
         // A BLAS the game released can share its address with a newer game
         // allocation (placed-resource reuse): that address is no longer ours.
         // Evicting also drops idle leases' references so the BLAS is freed.
-        if(owned&&!GameHolds(*owned)) {EvictReleased(samples);owned=nullptr;}
+        if(owned&&!GameHolds(*owned,references)) {EvictReleased(samples);references=RuntimeReferences();owned=nullptr;}
         if(ctx.stats.lost||!owned||instance.InstanceMask!=0x80||instance.InstanceID>=32) {
             instance.InstanceMask=0;Reject();continue;
         }
@@ -1514,10 +1720,15 @@ RuntimeStats ReadRuntimeStats() {
     const uint64_t now=GetTickCount64();
     if(!sampled||now-sampled>=500) {
         sampled=now;counts={};QueueSamples samples;
+        CollectGpuTimings(now,samples);
         for(const auto& lease:C().leases)++counts[static_cast<size_t>(ClassifyLease(lease,samples))];
     }
     stats.leasesRecording=counts[1];stats.leasesRecorded=counts[2];stats.leasesPending=counts[3];stats.leasesAvailable=counts[4];stats.leasesUnsafe=counts[5];
     stats.trackedLists=static_cast<uint32_t>(C().lists.size());stats.listLimit=static_cast<uint32_t>(kMaxLists);
+    stats.trackedQueues=static_cast<uint32_t>(C().queues.size());stats.queueLimit=static_cast<uint32_t>(kMaxQueues);
+    stats.indexBytes=ConvertedIndexBytes();
+    stats.gpuTimingSamples=C().stats.gpuTimingSamples;stats.gpuTimingFailures=C().stats.gpuTimingFailures;
+    stats.gpuTimingTick=C().stats.gpuTimingTick;stats.gpuConverterMs=C().stats.gpuConverterMs;stats.gpuBlasMs=C().stats.gpuBlasMs;
     for(const auto& entry:C().associations)if(entry.owner) {
         ++stats.liveOwners;stats.hairBlasBytes+=entry.bytes;stats.hairScratchBytes+=entry.scratchBytes;
     }

@@ -15,6 +15,54 @@ HMODULE LoadSystemModule(const wchar_t*) noexcept {
 void Log(const wchar_t* text) noexcept {if(text)std::wprintf(L"%ls\n",text);}
 }
 namespace {
+unsigned forwardedSubmissions{};
+void STDMETHODCALLTYPE ForwardSubmission(ID3D12CommandQueue*,UINT,ID3D12CommandList* const*) {++forwardedSubmissions;}
+void TestQueueIsolationAndBudgets() {
+    using namespace witcher_dots;
+    using namespace runtime_policy;
+    static_assert(runtime_policy::kMaxQueues==32);
+    assert(!SweepDue(110,100)&&SweepDue(350,100)&&SweepDue(110,100,true));
+    assert(FitsBudget(397*kMiB,128*kMiB,1024*kMiB)&&!FitsBudget(397*kMiB,128*kMiB,512*kMiB));
+    assert(!FitsBudget(UINT64_MAX,10,512*kMiB)&&!FitsBudget(0,0,512*kMiB));
+    assert(GeometryLimit(512*kMiB,24*1024*kMiB,20*1024*kMiB,0,128*kMiB)==1024*kMiB);
+    assert(GeometryLimit(512*kMiB,12*1024*kMiB,11*1024*kMiB,0,128*kMiB)==512*kMiB);
+    assert(GeometryLimit(512*kMiB,0,0,0,128*kMiB)==512*kMiB);
+    assert(GeometryLimit(512*kMiB,1024*kMiB,2048*kMiB,0,1)==512*kMiB);
+    assert(GeometryLimit(512*kMiB,24*1024*kMiB,20*1024*kMiB,4*1024*kMiB,1)==512*kMiB);
+    assert(AsLimit(0)==1024*kMiB&&AsLimit(12*1024*kMiB)==3*1024*kMiB&&AsLimit(UINT64_MAX)==4*1024*kMiB);
+    ReferenceCounts references;const void* a=reinterpret_cast<void*>(0x1000),*b=reinterpret_cast<void*>(0x3000);
+    references.Add(a);references.Add(a);references.Add(b);references.Add(nullptr);
+    assert(references.Get(a)==2&&references.Get(b)==1&&references.Get(nullptr)==0);
+    references.Remove(a);references.Remove(b);assert(references.Get(a)==1&&!references.Get(b));
+    references.Add(b);assert(references.Get(b)==1);
+    // Execute the actual forwarder: an untracked overlay queue is harmless
+    // until a recording with hair leases is submitted on it.
+    std::array<void*,80> table{};struct Fake {void** table;};Fake queue{table.data()},object{table.data()};
+    auto* q=reinterpret_cast<ID3D12CommandQueue*>(&queue);
+    auto* key=reinterpret_cast<ID3D12GraphicsCommandList4*>(&object);
+    ListState state;state.keep.Attach(key);state.generation=42;state.open=false;
+    assert(IndexList(key,&state));
+    canonical[static_cast<size_t>(Kind::Queue)][10]=reinterpret_cast<void*>(&ForwardSubmission);
+    ID3D12CommandList* list=reinterpret_cast<ID3D12CommandList*>(key);
+    Execute(q,1,&list);assert(forwardedSubmissions==1&&!C().stats.lost);
+    state.hasLeases=true;state.leases={0};C().leases[0].list=key;C().leases[0].generation=42;
+    Execute(q,1,&list);
+    assert(forwardedSubmissions==2&&C().stats.lost&&C().leases[0].poisoned);
+    assert(strstr(C().stats.lostReason,"untracked queue"));
+    std::string error;HairInput hair;D3D12_RAYTRACING_ACCELERATION_STRUCTURE_PREBUILD_INFO info{};
+    assert(!PrebuildTriangles(hair,7,info,error)&&error.find("untracked queue")!=std::string::npos);
+    Lost("another failure");assert(strstr(C().stats.lostReason,"untracked queue")); // first reason retained
+    C().stats={};C().leases[0]={};state.keep.Detach();
+    for(size_t i=0;i<listKeys.size();++i)if(listKeys[i].load()==key){listKeys[i]=nullptr;listValues[i]=nullptr;}
+    std::array<uint64_t,4> ticks{100,200,210,400};
+    assert(gpu_profile::Valid(ticks.data(),1000)&&!gpu_profile::Valid(ticks.data(),0));
+    ticks[2]=150;assert(!gpu_profile::Valid(ticks.data(),1000));
+    gpu_profile::SetEnabled(true);const auto epoch=gpu_profile::epoch.load();
+    gpu_profile::SetEnabled(true);assert(gpu_profile::epoch.load()==epoch);
+    gpu_profile::SetEnabled(false);assert(!gpu_profile::Enabled()&&gpu_profile::epoch.load()>epoch);
+    Lease timing;assert(!PrepareTiming(timing)&&!timing.timingHeap&&!timing.timingReadback);
+    std::puts("PASS: real Execute overlay-only forwarding vs unfenced hair; first failure reason; bounded transition headroom; overflow guards; reference counts; GPU timings off without allocation");
+}
 struct HostIdentity final : IUnknown {
     ULONG references=1;
     HRESULT STDMETHODCALLTYPE QueryInterface(REFIID iid,void** out) override {
@@ -46,8 +94,9 @@ struct HostResource final : ID3D12Resource {
         if(iid!=__uuidof(ID3D12Device))return E_NOINTERFACE;
         *out=reinterpret_cast<ID3D12Device*>(device);device->AddRef();return S_OK;
     }
-    HRESULT STDMETHODCALLTYPE Map(UINT,const D3D12_RANGE*,void**) override {assert(false);return E_NOTIMPL;}
-    void STDMETHODCALLTYPE Unmap(UINT,const D3D12_RANGE*) override {assert(false);}
+    void* mappedMemory{};unsigned maps{},unmaps{};
+    HRESULT STDMETHODCALLTYPE Map(UINT,const D3D12_RANGE*,void** output) override {assert(mappedMemory&&output);++maps;*output=mappedMemory;return S_OK;}
+    void STDMETHODCALLTYPE Unmap(UINT,const D3D12_RANGE*) override {assert(mappedMemory);++unmaps;}
     D3D12_RESOURCE_DESC STDMETHODCALLTYPE GetDesc() override {++descriptions;return desc;}
     D3D12_GPU_VIRTUAL_ADDRESS STDMETHODCALLTYPE GetGPUVirtualAddress() override {++addresses;return address;}
     HRESULT STDMETHODCALLTYPE WriteToSubresource(UINT,const D3D12_BOX*,const void*,UINT,UINT) override {assert(false);return E_NOTIMPL;}
@@ -85,6 +134,35 @@ struct HostFence final : ID3D12Fence {
     HRESULT STDMETHODCALLTYPE SetEventOnCompletion(UINT64,HANDLE) override {assert(false);return E_NOTIMPL;}
     HRESULT STDMETHODCALLTYPE Signal(UINT64) override {assert(false);return E_NOTIMPL;}
 };
+void TestGpuTimingReadbackSafety() {
+    using namespace witcher_dots;
+    HostIdentity device,queueIdentity;HostFence fence;HostResource readback(&device,0x100000);
+    std::array<uint64_t,4> ticks{100,102,103,106};readback.mappedMemory=ticks.data();
+    auto* queue=reinterpret_cast<ID3D12CommandQueue*>(&queueIdentity);auto& ctx=C();
+    auto& q=ctx.queues[queue];q.keep=queue;q.fence=&fence;q.timestampFrequency=1000;
+    ListState state;state.generation=7;state.open=true;
+    const auto key=reinterpret_cast<ID3D12GraphicsCommandList4*>(0xcafe1230ull);assert(IndexList(key,&state));
+    auto& lease=ctx.leases[0];lease.list=key;lease.generation=7;lease.queue=queue;lease.fenceValue=10;
+    lease.timingReadback=&readback;lease.timingSerial=1;
+    gpu_profile::SetEnabled(true);lease.timingEpoch=gpu_profile::epoch.load();
+    fence.complete=10;QueueSamples recording;CollectGpuTimings(1000,recording);assert(!readback.maps);
+    state.open=false;fence.complete=9;QueueSamples pending;CollectGpuTimings(1000,pending);assert(!readback.maps);
+    fence.complete=10;QueueSamples done;CollectGpuTimings(1000,done);
+    assert(readback.maps==1&&readback.unmaps==1&&ctx.stats.gpuTimingSamples==1);
+    assert(ctx.stats.gpuConverterMs==2&&ctx.stats.gpuBlasMs==3);
+    QueueSamples duplicate;CollectGpuTimings(1001,duplicate);assert(readback.maps==1);
+    ++state.generation;++lease.timingSerial;QueueSamples stale;CollectGpuTimings(1002,stale);assert(readback.maps==1);
+    state.generation=7;lease.poisoned=true;QueueSamples poisoned;CollectGpuTimings(1003,poisoned);assert(readback.maps==1);
+    lease.poisoned=false;fence.complete=UINT64_MAX;QueueSamples removed;CollectGpuTimings(1004,removed);assert(readback.maps==1);
+    fence.complete=10;gpu_profile::SetEnabled(false);QueueSamples off;CollectGpuTimings(1005,off);assert(readback.maps==1);
+    gpu_profile::SetEnabled(true);QueueSamples epoch;CollectGpuTimings(1006,epoch);assert(readback.maps==1); // old session ignored
+    lease.timingEpoch=gpu_profile::epoch.load();ticks[2]=101;
+    QueueSamples invalid;CollectGpuTimings(1007,invalid);assert(readback.maps==2&&ctx.stats.gpuTimingFailures==1);
+    gpu_profile::SetEnabled(false);lease={};ctx.queues.clear();ctx.stats={};
+    for(size_t i=0;i<listKeys.size();++i)if(listKeys[i].load()==key){listKeys[i]=nullptr;listValues[i]=nullptr;}
+    assert(readback.references==1&&queueIdentity.references==1&&fence.references==1);
+    std::puts("PASS: GPU timing readback waits for closed/current/completed recording without blocking; removal/poison/epoch/invalid data rejected; exact timing units; duplicate samples ignored");
+}
 void TestScopedReuse() {
     using namespace witcher_dots;
     HostIdentity device,other;
@@ -463,11 +541,42 @@ void TestResourceMetadata() {
     C().identity.Reset();
     assert(device.references==1&&other.references==1&&positions.references==1&&indices.references==1&&replacement.references==1&&foreign.references==1);
 }
+void TestIndexedLeaseLifetime() {
+    using namespace witcher_dots;
+    if constexpr(!kIndexedGeometry)return;
+    HostIdentity device;HostResource old(&device,0x100000),next(&device,0x200000);
+    Lease lease;C().convertedIndices=&old;
+    assert(RetainConvertedIndices(lease)&&old.references==3);
+    assert(RetainConvertedIndices(lease)&&old.references==3); // no duplicate retention
+    C().convertedIndices=&next;
+    assert(old.references==2&&RetainConvertedIndices(lease)&&next.references==3);
+    assert(ConvertedIndexBytes()==next.desc.Width); // local lease not in context yet
+    // Account actual context leases, not arbitrary host stack references.
+    C().leases[0]=std::move(lease);
+    assert(ConvertedIndexBytes()==old.desc.Width+next.desc.Width);
+    C().convertedIndices.Reset();
+    assert(old.references==2&&next.references==2); // old recording owns both
+    DropLeaseReferences(C().leases[0]);C().leases[0]={};
+    assert(old.references==1&&next.references==1&&ConvertedIndexBytes()==0);
+    // Every slot occupied by different retained prefixes -> fail closed.
+    std::array<std::unique_ptr<HostResource>,kMaxOwners> versions;
+    for(size_t i=0;i<versions.size();++i) {
+        versions[i]=std::make_unique<HostResource>(&device,0x300000+i*0x1000);
+        C().convertedIndices=versions[i].get();assert(RetainConvertedIndices(lease));
+    }
+    C().convertedIndices=&old;assert(!RetainConvertedIndices(lease));
+    C().convertedIndices.Reset();DropLeaseReferences(lease);
+    for(const auto& version:versions)assert(version->references==1);
+    std::puts("PASS: immutable index prefixes shared, recording retains old/grown buffers, balanced references, bounded generations");
+}
 }
 
 int main() {
+    TestQueueIsolationAndBudgets();
     using namespace witcher_dots;
     TestResourceMetadata();
+    TestGpuTimingReadbackSafety();
+    TestIndexedLeaseLifetime();
     TestScopedReuse();TestCheckedSnapshots();TestScopedMemory();TestCurrentPageValidation();TestLeasesAndSaveRetention();
     cpu_profile::Window window;cpu_profile::Sample sample{};
     window.Update(100,sample,1000000);assert(!window.known);
@@ -531,7 +640,11 @@ int main() {
         assert(protected_pointer::QueryProtection(slot,p->protection,sizeof(void*)));
         p->slot.store(slot,std::memory_order_release);
     }
+    cpu_profile::SetEnabled(true);
+    const auto tableQueries=cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls;
     assert(CurrentListTable(list));
+    assert(cpu_profile::Read()[static_cast<size_t>(cpu_profile::Part::MemoryQuery)].calls-tableQueries<=3);
+    cpu_profile::SetEnabled(false);
     const auto before=table[26];table[26]=reinterpret_cast<void*>(0x9999);
     assert(CurrentListIdentity(list)&&!CurrentListTable(list));table[26]=before;
     const auto identity=table[0];table[0]=reinterpret_cast<void*>(0x9999);

@@ -1,12 +1,13 @@
 #pragma once
 #include "dots/witcher_dots.h"
+#include "dots/gpu_profile.h"
 #include <deps/imgui/imgui.h>
 #include <cstring>
 #include <sstream>
 #include <string>
 
 namespace hair_overlay {
-inline constexpr const char* kVersion="1.0.0";
+inline constexpr const char* kVersion="1.1.0";
 inline const char* YesNo(bool value) {return value?"Yes":"No";}
 inline double MiB(uint64_t bytes) {return static_cast<double>(bytes)/(1024.0*1024.0);}
 inline bool Tracing(const char* activity) {return std::strcmp(activity,"active (tracing converted hair)")==0;}
@@ -28,6 +29,15 @@ inline std::string Diagnostics(const witcher_dots::Snapshot& s,const char* activ
        <<"\nRejected/declined while Off: "<<s.rejected<<" / "<<s.declinedWhileOff
        <<"\nLast build/traced instance age (ms; UINT64_MAX = unknown): "<<s.lastBuildAgeMs<<" / "<<s.lastHairAgeMs
        <<"\nTracked lists/limit/capacity misses: "<<s.trackedLists<<" / "<<s.listLimit<<" / "<<s.listCapacityMisses
+       <<"\nTracked queues/limit/capacity misses: "<<s.trackedQueues<<" / "<<s.queueLimit<<" / "<<s.queueCapacityMisses
+       <<"\nLocal list tracking failures/sweeps: "<<s.listTrackingFailures<<" / "<<s.sweeps
+       <<"\nPool failures budget/busy/allocation: "<<s.poolBudgetFailures<<" / "<<s.poolBusyFailures<<" / "<<s.poolAllocationFailures
+       <<"\nLast allocation HRESULT: 0x"<<std::hex<<static_cast<uint32_t>(s.lastAllocationResult)<<std::dec
+       <<"\nGeometry layout: "<<(s.indexedGeometry?"indexed 8 vertices (experimental)":"approved 12 vertices")
+       <<"\nShared index bytes: "<<s.indexBytes<<"\nGeometry/AS retention caps: "<<s.geometryPoolLimit<<" / "<<s.asRetentionLimit
+       <<"\nAllocation budget queries: "<<s.memoryBudgetQueries
+       <<"\nGPU timings enabled: "<<YesNo(s.gpuTimingsEnabled)<<"; samples/failures: "<<s.gpuTimingSamples<<" / "<<s.gpuTimingFailures
+       <<"\nGPU sampled conversion/BLAS ms: "<<s.gpuConverterMs<<" / "<<s.gpuBlasMs<<"; age ms: "<<s.gpuTimingAgeMs
        <<"\nPrebuild cache hits/driver queries: "<<s.prebuildCacheHits<<" / "<<s.prebuildDriverQueries
        <<"\nFence queries: "<<s.fenceDriverQueries<<"\nScoped reuse/full validations: "<<s.inputReuseHits<<" / "<<s.inputReuseMisses
        <<"\nLeases recording/recorded/awaiting GPU/reusable/unsafe: "<<s.leasesRecording<<" / "<<s.leasesRecorded
@@ -47,6 +57,7 @@ inline std::string Diagnostics(const witcher_dots::Snapshot& s,const char* activ
 }
 inline void Draw(const witcher_dots::Snapshot& s,const char* activity,const char* stage) {
     ImGui::Text("PT Hair Unlock %s",kVersion);
+    if(s.indexedGeometry)ImGui::TextColored(ImVec4(1,0.75f,0.25f,1),"Experimental indexed geometry - restart/A-B required");
     ImGui::TextColored(Tracing(activity)?ImVec4(0.35f,1.0f,0.55f,1.0f):ImVec4(1.0f,0.75f,0.25f,1.0f),"%s",activity);
     ImGui::Text("Game Path Traced Hair: %s",s.gameHairTraced?"On":"Off / not active");
     if(ShowReason(s,activity))ImGui::TextWrapped("Status detail: %s",s.reason);
@@ -72,12 +83,27 @@ inline void Draw(const witcher_dots::Snapshot& s,const char* activity,const char
         if(s.lastHairAgeMs!=UINT64_MAX)ImGui::Text("Last traced instance: %llu ms ago",s.lastHairAgeMs);
         ImGui::SeparatorText("Resource Tracking");
         ImGui::Text("Command lists: %u / %u; capacity misses: %llu",s.trackedLists,s.listLimit,s.listCapacityMisses);
+        ImGui::Text("Queues: %u / %u; capacity misses: %llu",s.trackedQueues,s.queueLimit,s.queueCapacityMisses);
+        ImGui::Text("Local tracking failures / sweeps: %llu / %llu",s.listTrackingFailures,s.sweeps);
+        ImGui::Text("Pool failures budget / busy / allocation: %llu / %llu / %llu",s.poolBudgetFailures,s.poolBusyFailures,s.poolAllocationFailures);
+        ImGui::Text("Geometry pool / AS retention limits: %.0f / %.0f MiB",MiB(s.geometryPoolLimit),MiB(s.asRetentionLimit));
+        if(s.indexedGeometry)ImGui::Text("Immutable shared indices: %.1f MiB",MiB(s.indexBytes));
         ImGui::Text("BLAS cache hits / queries: %llu / %llu",s.prebuildCacheHits,s.prebuildDriverQueries);
         ImGui::Text("Fence queries: %llu; scoped reuse / validations: %llu / %llu",s.fenceDriverQueries,s.inputReuseHits,s.inputReuseMisses);
         ImGui::TextWrapped("Leases recording / recorded / awaiting GPU / reusable / unsafe: %u / %u / %u / %u / %u",s.leasesRecording,s.leasesRecorded,s.leasesPending,s.leasesAvailable,s.leasesUnsafe);
         ImGui::Text("Pool allocations / reuses / releases: %llu / %llu / %llu",s.poolAllocations,s.poolReturns,s.poolReleases);
         ImGui::Text("Full rebuilds / evictions: %llu / %llu",s.fullRebuilds,s.evictions);
         if(s.memoryKnown)ImGui::Text("Process VRAM / budget: %.0f / %.0f MiB",MiB(s.vramUsage),MiB(s.vramBudget));
+        if(ImGui::TreeNode("GPU timings (advanced)")) {
+            bool profiling=witcher_dots::gpu_profile::Enabled();
+            if(ImGui::Checkbox("Enable GPU timestamps (this session only)",&profiling))witcher_dots::gpu_profile::SetEnabled(profiling);
+            ImGui::TextWrapped("Samples the last conversion in completed recordings. Not whole-frame GPU time; do not sum samples as frame cost. No CPU wait/flush. Disable for FPS comparisons.");
+            if(!profiling)ImGui::TextUnformatted("GPU timestamps are off.");
+            else if(!s.gpuTimingSamples||s.gpuTimingAgeMs>2000)ImGui::TextUnformatted("Waiting for recent completed hair recordings.");
+            else ImGui::Text("Sampled conversion / BLAS: %.3f / %.3f ms",s.gpuConverterMs,s.gpuBlasMs);
+            ImGui::Text("Samples / failures: %llu / %llu",s.gpuTimingSamples,s.gpuTimingFailures);
+            ImGui::TreePop();
+        }
         if(ImGui::TreeNode("CPU timings (advanced)")) {
             bool profiling=witcher_dots::cpu_profile::Enabled();
             if(ImGui::Checkbox("Enable detailed CPU timings (this session only)",&profiling))witcher_dots::cpu_profile::SetEnabled(profiling);
@@ -96,7 +122,7 @@ inline void Draw(const witcher_dots::Snapshot& s,const char* activity,const char
     if(ImGui::CollapsingHeader("About / Compatibility Notes")) {
         ImGui::TextWrapped("Supports the exact Steam 5.00c DX12 5.0.0.1044392 executable, NVIDIA Ada / RTX 40, a supported driver and verified shader/runtime hashes. Other builds fail closed.");
         ImGui::TextWrapped("Do not combine this addon with RTXMFG's Witcher DOTS backend or another PT Hair unlocker. This addon does not require MFG Unlock.");
-        ImGui::TextWrapped("Original DOTS renderer/geometry/shader implementation: dashdogy / Michael Robles, RTX40MFG-Unlock, MIT, commit 49dc07ba00568c4337d7efc79a4b9e6470289d15. Guarded-read reference: upstream v1.4.1. Third-party license notices are included in the download.");
+        ImGui::TextWrapped("Original DOTS renderer/geometry/shader implementation: dashdogy / Michael Robles, RTX40MFG-Unlock, MIT, commit 49dc07ba00568c4337d7efc79a4b9e6470289d15. Guarded-read and overlay queue/list isolation reference: upstream v1.4.1 (866f491f). Third-party license notices are included in the download.");
     }
 }
 }
